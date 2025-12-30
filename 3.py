@@ -574,6 +574,11 @@ def parse_args(input_args=None):
         type=float,
         default=0,
     )
+    parser.add_argument(
+        "--use_teacher_text_encoder",
+        action="store_true",
+        default=False,
+    )
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -769,6 +774,13 @@ def compute_time_ids(original_size, resized_size, crops_coords_top_left):
     return add_time_ids
 
 
+def clone_state_dict(d: dict) -> dict: 
+    new_state_dict = {}
+    for key, value in d.items():
+        new_state_dict[key] = value.detach().clone()
+    return new_state_dict
+
+
 def main(args):
     if args.quick_test:
         global validation_prompt
@@ -904,7 +916,11 @@ def main(args):
     教师pipeline.text_encoder_2.requires_grad_(False)
 
     for k in ['text_encoder_one', 'text_encoder_two', 'text_encoder_three', 'vae', 'transformer', '教师pipeline.unet', '教师pipeline.vae', '教师pipeline.text_encoder', '教师pipeline.text_encoder_2']:
-        print(f'{k}参数量: {eval(k).num_parameters(only_trainable=False) / 1e9:.2f} B')
+        v = eval(k)
+        print(f'{k}({type(v).__name__})参数量: {v.num_parameters(only_trainable=False) / 1e9:.2f} B')
+
+    if args.use_teacher_text_encoder:
+        text_encoder_two.load_state_dict(clone_state_dict(教师pipeline.text_encoder_2.state_dict()), strict=True)
 
     def unwrap_model(model):
         model = accelerator.unwrap_model(model)
@@ -1029,7 +1045,7 @@ def main(args):
     # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
-    特征 = f'{哈(args.train_data_dir)}-{哈(args.pretrained_model_name_or_path)}-{哈(args.teacher_model_name_or_path)}-{args.optimizer}-lr{args.learning_rate}-{args.lr_num_cycles}-drop{args.drop_text_rate}&{args.drop_tag_rate}&{args.drop_char_feature_rate}-{args.mixed_precision}-{args.lr_scheduler}-SS{args.sigmas_scale}-n{args.inference_steps}' + '-TEST'*bool(args.quick_test)
+    特征 = f'{哈(args.train_data_dir)}-{哈(args.pretrained_model_name_or_path)}-{哈(args.teacher_model_name_or_path)}-{args.optimizer}-lr{args.learning_rate}-{args.lr_num_cycles}-drop{args.drop_text_rate}&{args.drop_tag_rate}&{args.drop_char_feature_rate}-{args.mixed_precision}-{args.lr_scheduler}-SS{args.sigmas_scale}-n{args.inference_steps}' + '-TEST'*bool(args.quick_test) + '-te'*bool(args.use_teacher_text_encoder) 
     if args.tread_p:
         特征 += f'-T{args.tread_a}_{args.tread_b}_{args.tread_p}'
         patch_sd3_tread(transformer, args.tread_a, args.tread_b, args.tread_p)
