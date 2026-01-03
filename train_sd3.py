@@ -5,10 +5,10 @@ import math
 import random
 import logging
 import argparse
-import datetime
 import warnings
 from pathlib import Path
 
+from datasets import load_dataset
 import numpy as np
 import torch
 import torch.utils.checkpoint
@@ -19,7 +19,6 @@ from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration
 from huggingface_hub import create_repo
 from torch.utils.data import Dataset
 from torchvision import transforms
-from torchvision.transforms.functional import crop
 from tqdm.auto import tqdm
 from transformers import CLIPTextModelWithProjection, CLIPTokenizer, PretrainedConfig, T5EncoderModel, T5TokenizerFast
 
@@ -31,7 +30,8 @@ from diffusers.training_utils import compute_density_for_timestep_sampling, comp
 from diffusers.utils.torch_utils import is_compiled_module
 from compel import Compel, ReturnedEmbeddingsType
 
-from common import 计时, 哈, cycle, clean, sdxl_time_to_alpha, 生成optimizer, 评测pipeline, add_image_jpeg
+from dan后处理 import dan后处理
+from common import 计时, 哈, cycle, clean, sdxl_time_to_alpha, 生成optimizer, 评测pipeline, add_image_jpeg, validation_prompt
 from common import encode_prompt as encode_prompt_sdxl
 from tread_sd3 import patch_sd3_tread
 
@@ -53,16 +53,6 @@ def load_text_encoders(class_one, class_two, class_three):
         args.pretrained_model_name_or_path, subfolder="text_encoder_3", revision=args.revision, variant=args.variant
     )
     return text_encoder_one, text_encoder_two, text_encoder_three
-
-
-validation_prompt = [
-    ('1girl, kisaki (blue archive), eating baozi, sitting, indoors, huwari (dnwls3010)', 1),
-    ('1girl, black twintails, school uniform, outdoors, street, fullbody, black pantyhose, holding phone, looking at phone, > <, kani biimu', 2),
-    ('1girl, twintails, cat ears, maid, maid headdress, holding tray, white pantyhose, indoors, kitchen, momoko (momopoco), newest', 3),
-    ('1girl, momoi (blue archive), typing on keyboard, computer, sitting, angry, indoors, fuzichoco, newest', 4),
-    ('1girl, yuuka (blue archive), holding cup, sitting, indoors, kantoku, newest', 5),
-    ('1girl, azusa (blue archive), eating pizza, sitting, indoors, fuzichoco', 6),
-]
 
 
 def log_validation(
@@ -89,8 +79,6 @@ def log_validation(
             accelerator.log({f"分数-cfg{guidance_scale}": 分数}, step=global_step)
     for tracker in accelerator.trackers:
         if tracker.name == "tensorboard":
-            # np_images = np.stack([np.asarray(img) for img in images])
-            # tracker.writer.add_images(f"validation-cfg{guidance_scale}", np_images, global_step, dataformats="NHWC")
             concat_image = np.concatenate([np.asarray(img) for img in images], axis=1)
             add_image_jpeg(tracker.writer, f"validation-cfg{guidance_scale}", concat_image, global_step)
     del pipeline
@@ -98,103 +86,15 @@ def log_validation(
     return images
 
 
-# 共通部分
-import random
-from torchvision import transforms
-from torchvision.transforms.functional import crop
-from datasets import load_dataset
-from 人物特征标签 import 人物特征标签表
-
-
-def 计算prompt(d: dict):
-    from 标签处理 import 计算时间标签, 分离人数标签, rating_map
-    for k, v in [*d.items()]:
-        assert len(v) == 1
-        d[k] = v[0]
-
-    原始tags = d['tag_string_general'].split()
-    人标签, 剩下的标签 = 分离人数标签(原始tags)
-    random.shuffle(剩下的标签)
-
-    剩下的标签 = random.sample(剩下的标签, min(80, int(len(剩下的标签) * (1 - args.drop_tag_rate))))
-
-    角色标签 = d['tag_string_character'].split()
-    for 角色 in 角色标签:
-        for 签 in 人物特征标签表.get(角色, []):
-            if random.random() < args.drop_char_feature_rate and 签 in 剩下的标签:
-                剩下的标签.remove(签)
-
-    画师标签 = d['tag_string_artist']
-    if random.random() < 0.1:
-        画师标签 = 'artist:' + 画师标签
-    画师标签 = [画师标签]
-
-    时间标签 = 计算时间标签(d['created_at'])
-
-    rating标签 = [rating_map[d['rating']]]
-
-    if random.random() < 0.1:
-        画师标签 = []
-    if random.random() < 0.5:
-        时间标签 = []
-    if random.random() < 0.5:
-        rating标签 = []
-    新tags = 人标签 + 角色标签 + rating标签 + 剩下的标签 + 画师标签 + 时间标签
-    新tags = [i for i in 新tags if i]
-
-    d['prompts'] = ', '.join(新tags).replace('_', ' ')
-
-    return {k: [v] for k, v in d.items()}
-
-
-train_transforms = transforms.Compose(
-    [
-        transforms.ToTensor(),
-        transforms.Normalize([0.5], [0.5]),
-    ]
-)
-def preprocess_train(examples):
-    images = [image.convert("RGB") for image in examples['image']]
-    original_sizes = []
-    resized_sizes = []
-    all_images = []
-    crop_top_lefts = []
-    for image in images:
-        目标边长 = random.randint(576, 1344)
-        r = ((目标边长 * 目标边长) / (image.height * image.width)) ** 0.5
-        train_resize = transforms.Resize((int(image.height*r), int(image.width*r)), interpolation=transforms.InterpolationMode.LANCZOS)
-        original_sizes.append((image.height, image.width))
-        image = train_resize(image)
-        目标size = (image.height // 64 * 64, image.width // 64 * 64)
-        train_crop = transforms.RandomCrop((image.height // 64 * 64, image.width // 64 * 64))
-        y1, x1, h, w = train_crop.get_params(image, 目标size)
-        resized_sizes.append(目标size)
-        image = crop(image, y1, x1, h, w)
-        crop_top_left = (y1, x1)
-        crop_top_lefts.append(crop_top_left)
-        image = train_transforms(image)
-        all_images.append(image)
-
-    examples["original_sizes"] = original_sizes
-    examples["resized_sizes"] = resized_sizes
-    examples["crop_top_lefts"] = crop_top_lefts
-    examples["pixel_values"] = all_images
-    examples["原本images"] = images
-    examples = 计算prompt(examples)
-    return examples
-
-
-def 生成dataset(accelerator) -> tuple:
+def 生成dataset(accelerator, drop_tag_rate, drop_char_feature_rate) -> tuple:
+    d后 = dan后处理(drop_tag_rate, drop_char_feature_rate, (576, 1344))
     dataset = load_dataset(
         "imagefolder",
         data_files={"train": os.path.join(args.train_data_dir, "**")},
     )
-
     with accelerator.main_process_first():
-        train_dataset = dataset["train"].with_transform(preprocess_train, output_all_columns=True)
-
+        train_dataset = dataset["train"].with_transform(d后.preprocess_train, output_all_columns=True)
     return train_dataset
-# 共通部分结束
 
 
 def import_model_class_from_model_name_or_path(
@@ -616,35 +516,6 @@ def collate_fn(examples):
     return batch
 
 
-class PromptDataset(Dataset):
-    "A simple dataset to prepare the prompts to generate class images on multiple GPUs."
-
-    def __init__(self, prompt, num_samples):
-        self.prompt = prompt
-        self.num_samples = num_samples
-
-    def __len__(self):
-        return self.num_samples
-
-    def __getitem__(self, index):
-        example = {}
-        example["prompt"] = self.prompt
-        example["index"] = index
-        return example
-
-
-def tokenize_prompt(tokenizer, prompt):
-    text_inputs = tokenizer(
-        prompt,
-        padding="max_length",
-        max_length=77,
-        truncation=True,
-        return_tensors="pt",
-    )
-    text_input_ids = text_inputs.input_ids
-    return text_input_ids
-
-
 def _encode_prompt_with_t5(
     text_encoder,
     tokenizer,
@@ -994,7 +865,7 @@ def main(args):
     if not args.learning_rate_muon:
         args.learning_rate_muon = args.learning_rate * 40
     optimizer = 生成optimizer(args.optimizer, transformer, args.adam_beta1, args.adam_beta2, args.adam_weight_decay, args.adam_epsilon, args.learning_rate, args.learning_rate_muon)
-    train_dataset = 生成dataset(accelerator)
+    train_dataset = 生成dataset(accelerator, args.drop_tag_rate, args.drop_char_feature_rate)
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
@@ -1014,11 +885,6 @@ def main(args):
             )
         return prompt_embeds, pooled_prompt_embeds
 
-    # If no type of tuning is done on the text_encoder and custom instance prompts are NOT
-    # provided (i.e. the --instance_prompt is used for all images), we encode the instance prompt once to avoid
-    # the redundant encoding.
-
-    # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if args.max_train_steps is None:
@@ -1182,7 +1048,10 @@ def main(args):
                         for i in range(args.inference_steps):
                             beta = 初始beta * (1 - i / args.inference_steps)
                             alpha = 1 - beta
-                            noisy_model_input小 = alpha**0.5 * 教师pred_x0 + beta**0.5 * noise小
+                            if i == 0:
+                                noisy_model_input小 = alpha**0.5 * 教师pred_x0 + beta**0.5 * noise小
+                            else:
+                                noisy_model_input小 = alpha**0.5 * 教师pred_x0 + beta**0.5 * 教师pred
                             with 计时(accelerator, global_step, 'unet_time'):
                                 add_time_ids = torch.cat(
                                     [compute_time_ids(s, r, c) for s, r, c in zip(batch["original_sizes"], batch["resized_sizes"], batch["crop_top_lefts"])]
@@ -1247,37 +1116,40 @@ def main(args):
                 noisy_model_input = batch['noisy_model_input'].to(accelerator.device)
                 target = batch['target'].to(accelerator.device)
                 sigmas = batch['sigmas']
-                model_pred = transformer(
-                    hidden_states=noisy_model_input,
-                    timestep=timesteps,
-                    encoder_hidden_states=batch['prompt_embeds'].to(accelerator.device),
-                    pooled_projections=batch['pooled_prompt_embeds'].to(accelerator.device),
-                    return_dict=False,
-                )[0]
-                model_pred = model_pred * (-sigmas) + noisy_model_input
-                if args.quick_test:
-                    with torch.no_grad():
-                        vae.to(accelerator.device)
-                        临时image_processor = VaeImageProcessor(vae_scale_factor=vae.config.scaling_factor)
-                        image = 临时image_processor.postprocess(vae.decode(model_pred.to(vae.dtype), return_dict=False)[0], output_type='pil')[0]
-                        image.save(f'sd3/{int(timesteps)}_学生pred_x0_pixels.png')
-                        vae.to('cpu')
+                try:
+                    model_pred = transformer(
+                        hidden_states=noisy_model_input,
+                        timestep=timesteps,
+                        encoder_hidden_states=batch['prompt_embeds'].to(accelerator.device),
+                        pooled_projections=batch['pooled_prompt_embeds'].to(accelerator.device),
+                        return_dict=False,
+                    )[0]
+                except Exception:
+                    logging.exception(f'step{global_step}出问题了，{noisy_model_input.shape=}')
+                else:
+                    model_pred = model_pred * (-sigmas) + noisy_model_input
+                    if args.quick_test:
+                        with torch.no_grad():
+                            vae.to(accelerator.device)
+                            临时image_processor = VaeImageProcessor(vae_scale_factor=vae.config.scaling_factor)
+                            image = 临时image_processor.postprocess(vae.decode(model_pred.to(vae.dtype), return_dict=False)[0], output_type='pil')[0]
+                            image.save(f'sd3/{int(timesteps)}_学生pred_x0_pixels.png')
+                            vae.to('cpu')
 
-                weighting = compute_loss_weighting_for_sd3(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
-                loss = torch.mean(
-                    (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1),
-                    1,
-                )
-                loss = loss.mean()
+                    weighting = compute_loss_weighting_for_sd3(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
+                    loss = torch.mean(
+                        (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1),
+                        1,
+                    )
+                    loss = loss.mean()
+                    accelerator.backward(loss)
+                    if accelerator.sync_gradients:
+                        grad_norm = accelerator.clip_grad_norm_(transformer.parameters(), args.max_grad_norm)
 
-                accelerator.backward(loss)
-                if accelerator.sync_gradients:
-                    grad_norm = accelerator.clip_grad_norm_(transformer.parameters(), args.max_grad_norm)
-
-                with 计时(accelerator, global_step, 'optimizer_step_time'):
-                    optimizer.step()
-                    lr_scheduler.step()
-                    optimizer.zero_grad()
+                    with 计时(accelerator, global_step, 'optimizer_step_time'):
+                        optimizer.step()
+                        lr_scheduler.step()
+                        optimizer.zero_grad()
 
             if global_step % 40 == 20:
                 clean()
