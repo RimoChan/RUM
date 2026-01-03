@@ -34,6 +34,21 @@ def clean():
         torch.cuda.empty_cache()
 
 
+def clone_state_dict(d: dict) -> dict: 
+    new_state_dict = {}
+    for key, value in d.items():
+        new_state_dict[key] = value.detach().clone()
+    return new_state_dict
+
+
+def compute_time_ids(original_size, resized_size, crops_coords_top_left):
+    # Adapted from pipeline.StableDiffusionXLPipeline._get_add_time_ids
+    target_size = resized_size
+    add_time_ids = list(original_size + crops_coords_top_left + target_size)
+    add_time_ids = torch.tensor([add_time_ids])
+    return add_time_ids
+
+
 def is_muon(name, param):
     skip_keys = ["embed_tokens", "lm_head", "tok_embeddings", "output"]
     return param.ndim >= 2 and not any(key in name for key in skip_keys)

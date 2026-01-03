@@ -27,21 +27,19 @@ from tqdm.auto import tqdm
 from transformers import CLIPTextModelWithProjection, CLIPTokenizer, PretrainedConfig, T5EncoderModel, T5TokenizerFast
 
 import diffusers
-from diffusers import (
-    AutoencoderKL,
-    FlowMatchEulerDiscreteScheduler,
-    FluxPipeline,
-    FluxTransformer2DModel,
-)
+from diffusers import AutoencoderKL, FlowMatchEulerDiscreteScheduler, FluxPipeline, FluxTransformer2DModel, StableDiffusionXLPipeline
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import compute_density_for_timestep_sampling, compute_loss_weighting_for_sd3
-
 from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
 from diffusers.utils.torch_utils import is_compiled_module
+from compel import Compel, ReturnedEmbeddingsType
 
 from dan后处理 import dan后处理
-from common import 计时, 哈, cycle, clean, sdxl_time_to_alpha, 生成optimizer, 评测pipeline, add_image_jpeg, validation_prompt
+from common import 计时, 哈, cycle, clean, sdxl_time_to_alpha, 生成optimizer, 评测pipeline, add_image_jpeg, validation_prompt, clone_state_dict, compute_time_ids
 from common import encode_prompt as encode_prompt_sdxl
+
+import muon
+muon.zeropower_via_newtonschulz5 = torch.compile(muon.zeropower_via_newtonschulz5)
 
 
 logger = get_logger(__name__)
@@ -55,37 +53,33 @@ def load_text_encoders(class_one, class_two):
 
 def log_validation(
     pipeline,
-    args,
     accelerator,
-    pipeline_args,
-    epoch,
-    torch_dtype,
-    is_final_validation=False,
+    global_step,
+    guidance_scale=5,
 ):
-    logger.info(
-        f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
-        f" {args.validation_prompt}."
-    )
-    pipeline = pipeline.to(accelerator.device)
-    pipeline.set_progress_bar_config(disable=True)
-
-    # run inference
-    generator = torch.Generator(device=accelerator.device).manual_seed(args.seed) if args.seed is not None else None
-    # autocast_ctx = torch.autocast(accelerator.device.type) if not is_final_validation else nullcontext()
-    autocast_ctx = nullcontext()
-
-    with autocast_ctx:
-        images = [pipeline(**pipeline_args, generator=generator).images[0] for _ in range(args.num_validation_images)]
-
+    images = []
+    with torch.autocast('cuda', dtype=torch.bfloat16):
+        with torch.inference_mode():
+            for prompt, seed in validation_prompt:
+                images.append(pipeline(
+                    prompt=prompt,
+                    generator=torch.Generator(device=accelerator.device).manual_seed(seed),
+                    num_inference_steps=20,
+                    guidance_scale=guidance_scale,
+                    width=704,
+                    height=1024,
+                ).images[0])
+                clean()
+            if global_step > 0:
+                pipeline.set_progress_bar_config(disable=True)
+                分数 = 评测pipeline(pipeline, n_iter=args.validation_n_iter, guidance_scale_range=(guidance_scale, guidance_scale+2))
+                accelerator.log({f"分数-cfg{guidance_scale}": 分数}, step=global_step)
     for tracker in accelerator.trackers:
-        phase_name = "test" if is_final_validation else "validation"
         if tracker.name == "tensorboard":
-            np_images = np.stack([np.asarray(img) for img in images])
-            tracker.writer.add_images(phase_name, np_images, epoch, dataformats="NHWC")
-
+            concat_image = np.concatenate([np.asarray(img) for img in images], axis=1)
+            add_image_jpeg(tracker.writer, f"validation-cfg{guidance_scale}", concat_image, global_step)
     del pipeline
-    torch.cuda.empty_cache()
-
+    clean()
     return images
 
 
@@ -145,7 +139,10 @@ def parse_args(input_args=None):
         default=None,
         help="Variant of the model files of the pretrained model identifier from huggingface.co/models, 'e.g.' fp16",
     )
-
+    parser.add_argument(
+        "--train_data_dir",
+        type=str,
+    )
     parser.add_argument(
         "--cache_dir",
         type=str,
@@ -153,23 +150,25 @@ def parse_args(input_args=None):
         help="The directory where the downloaded models and datasets will be stored.",
     )
     parser.add_argument(
-        "--instance_prompt",
-        type=str,
-        default=None,
-        required=True,
-        help="The prompt with identifier specifying the instance, e.g. 'photo of a TOK dog', 'in the style of TOK'",
-    )
-    parser.add_argument(
-        "--class_prompt",
-        type=str,
-        default=None,
-        help="The prompt to specify images in the same class as provided instance images.",
-    )
-    parser.add_argument(
         "--max_sequence_length",
         type=int,
         default=200,
         help="Maximum sequence length to use with with the T5 text encoder",
+    )
+    parser.add_argument(
+        "--validation_steps",
+        type=int,
+        default=4000,
+    )
+    parser.add_argument(
+        "--validation_n_iter",
+        type=int,
+        default=50,
+    )
+    parser.add_argument(
+        "--prefetch_steps",
+        type=int,
+        default=50,
     )
     parser.add_argument(
         "--output_dir",
@@ -180,9 +179,6 @@ def parse_args(input_args=None):
     parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
     parser.add_argument(
         "--train_batch_size", type=int, default=4, help="Batch size (per device) for the training dataloader."
-    )
-    parser.add_argument(
-        "--sample_batch_size", type=int, default=4, help="Batch size (per device) for sampling images."
     )
     parser.add_argument("--num_train_epochs", type=int, default=1)
     parser.add_argument(
@@ -233,19 +229,11 @@ def parse_args(input_args=None):
         default=1e-4,
         help="Initial learning rate (after the potential warmup period) to use.",
     )
-
     parser.add_argument(
         "--guidance_scale",
         type=float,
         default=3.5,
         help="the FLUX.1 dev variant is a guidance distilled model",
-    )
-
-    parser.add_argument(
-        "--text_encoder_lr",
-        type=float,
-        default=5e-6,
-        help="Text encoder learning rate to use.",
     )
     parser.add_argument(
         "--scale_lr",
@@ -305,61 +293,28 @@ def parse_args(input_args=None):
         default="AdamW",
         help=('The optimizer type to use. Choose between ["AdamW", "prodigy"]'),
     )
-
     parser.add_argument(
         "--use_8bit_adam",
         action="store_true",
         help="Whether or not to use 8-bit Adam from bitsandbytes. Ignored if optimizer is not set to AdamW",
     )
-
     parser.add_argument(
         "--adam_beta1", type=float, default=0.9, help="The beta1 parameter for the Adam and Prodigy optimizers."
     )
     parser.add_argument(
         "--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam and Prodigy optimizers."
     )
-    parser.add_argument(
-        "--prodigy_beta3",
-        type=float,
-        default=None,
-        help="coefficients for computing the Prodigy stepsize using running averages. If set to None, "
-        "uses the value of square root of beta2. Ignored if optimizer is adamW",
-    )
-    parser.add_argument("--prodigy_decouple", type=bool, default=True, help="Use AdamW style decoupled weight decay")
     parser.add_argument("--adam_weight_decay", type=float, default=1e-04, help="Weight decay to use for unet params")
     parser.add_argument(
         "--adam_weight_decay_text_encoder", type=float, default=1e-03, help="Weight decay to use for text_encoder"
     )
-
     parser.add_argument(
         "--adam_epsilon",
         type=float,
         default=1e-08,
         help="Epsilon value for the Adam optimizer and Prodigy optimizers.",
     )
-
-    parser.add_argument(
-        "--prodigy_use_bias_correction",
-        type=bool,
-        default=True,
-        help="Turn on Adam's bias correction. True by default. Ignored if optimizer is adamW",
-    )
-    parser.add_argument(
-        "--prodigy_safeguard_warmup",
-        type=bool,
-        default=True,
-        help="Remove lr from the denominator of D estimate to avoid issues during warm-up stage. True by default. "
-        "Ignored if optimizer is adamW",
-    )
     parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
-    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
-    parser.add_argument("--hub_token", type=str, default=None, help="The token to use to push to the Model Hub.")
-    parser.add_argument(
-        "--hub_model_id",
-        type=str,
-        default=None,
-        help="The name of the repository to keep in sync with the local `output_dir`.",
-    )
     parser.add_argument(
         "--logging_dir",
         type=str,
@@ -400,13 +355,39 @@ def parse_args(input_args=None):
     )
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     parser.add_argument(
-        "--image_interpolation_mode",
-        type=str,
-        default="lanczos",
-        choices=[
-            f.lower() for f in dir(transforms.InterpolationMode) if not f.startswith("__") and not f.endswith("__")
-        ],
-        help="The image interpolation method to use for resizing images.",
+        "--drop_text_rate",
+        type=float,
+        default=0.02,
+    )
+    parser.add_argument(
+        "--drop_tag_rate",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--drop_char_feature_rate",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--sigmas_scale",
+        type=float,
+        default=1.0,
+    )
+    parser.add_argument(
+        "--inference_steps",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
+        "--quick_test",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--use_teacher_text_encoder",
+        action="store_true",
+        default=False,
     )
 
     if input_args is not None:
@@ -585,6 +566,13 @@ def encode_prompt(
 
 
 def main(args):
+    if args.quick_test:
+        global validation_prompt
+        validation_prompt = validation_prompt[:1]
+        args.validation_steps = 5
+        args.prefetch_steps = 2
+        args.seed = 1
+        args.validation_n_iter = 2
     logging_dir = Path(args.output_dir, args.logging_dir)
 
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
@@ -646,14 +634,24 @@ def main(args):
         revision=args.revision,
         variant=args.variant,
     )
-    transformer = FluxTransformer2DModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="transformer", revision=args.revision, variant=args.variant
-    )
+    transformer = FluxTransformer2DModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="transformer", revision=args.revision, variant=args.variant)
 
     transformer.requires_grad_(True)
     vae.requires_grad_(False)
     text_encoder_one.requires_grad_(False)
     text_encoder_two.requires_grad_(False)
+
+    # weight_dtype = torch.float32
+    weight_dtype = torch.bfloat16
+    if accelerator.mixed_precision == "fp16":
+        weight_dtype = torch.float16
+    elif accelerator.mixed_precision == "bf16":
+        weight_dtype = torch.bfloat16
+    transformer.to('cpu', dtype=weight_dtype)
+    vae.to(accelerator.device, dtype=weight_dtype)
+    # text_encoder_one.to('cpu', dtype=torch.float32)
+    text_encoder_one.to('cpu', dtype=weight_dtype)
+    text_encoder_two.to('cpu', dtype=weight_dtype)
 
     教师pipeline = StableDiffusionXLPipeline.from_single_file(args.teacher_model_name_or_path, torch_dtype=torch.float16)
     教师pipeline的compel = Compel(truncate_long_prompts=False, tokenizer=[教师pipeline.tokenizer, 教师pipeline.tokenizer_2], text_encoder=[教师pipeline.text_encoder, 教师pipeline.text_encoder_2],  returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED, requires_pooled=[False, True])
@@ -663,19 +661,12 @@ def main(args):
     教师pipeline.text_encoder.requires_grad_(False)
     教师pipeline.text_encoder_2.requires_grad_(False)
 
-    # weight_dtype = torch.float32
-    weight_dtype = torch.bfloat16
-    if accelerator.mixed_precision == "fp16":
-        weight_dtype = torch.float16
-    elif accelerator.mixed_precision == "bf16":
-        weight_dtype = torch.bfloat16
-    vae.to(accelerator.device, dtype=weight_dtype)
-    text_encoder_one.to('cpu', dtype=weight_dtype)
-    text_encoder_two.to('cpu', dtype=weight_dtype)
+    if args.use_teacher_text_encoder:
+        text_encoder_one.load_state_dict(clone_state_dict(教师pipeline.text_encoder.state_dict()), strict=True)
 
-    for k in ['transformer', 'vae', 'text_encoder_one', 'text_encoder_two']:
+    for k in ['transformer', 'vae', 'text_encoder_one', 'text_encoder_two', '教师pipeline.unet', '教师pipeline.vae', '教师pipeline.text_encoder', '教师pipeline.text_encoder_2']:
         v = eval(k)
-        print(f'{k}({type(v).__name__})参数量: {v.num_parameters(only_trainable=False) / 1e9:.2f} B')
+        print(f'{k}({type(v).__name__})参数量: {v.num_parameters(only_trainable=False) / 1e9:.2f} B，dtype={v.dtype}')
 
     if args.gradient_checkpointing:
         transformer.enable_gradient_checkpointing()
@@ -736,14 +727,14 @@ def main(args):
             args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
         )
 
-    optimizer = 生成optimizer(args.optimizer, transformer, args.adam_beta1, args.adam_beta2, args.adam_weight_decay, args.adam_epsilon, args.learning_rate, args.learning_rate_muon)
+    optimizer = 生成optimizer(args.optimizer, transformer, args.adam_beta1, args.adam_beta2, args.adam_weight_decay, args.adam_epsilon, args.learning_rate, args.learning_rate * 40)
     train_dataset = 生成dataset(accelerator, args.drop_tag_rate, args.drop_char_feature_rate)
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=args.train_batch_size,
         shuffle=True,
-        collate_fn=lambda examples: collate_fn(examples, False),
+        collate_fn=lambda examples: collate_fn(examples),
         num_workers=args.dataloader_num_workers,
     )
 
@@ -793,7 +784,6 @@ def main(args):
                 f"the expected length ({len_train_dataloader_after_sharding}) when the learning rate scheduler was created. "
                 f"This inconsistency may result in the learning rate scheduler not functioning properly."
             )
-    # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
     特征 = f'{哈(args.train_data_dir)}-{哈(args.pretrained_model_name_or_path)}-{哈(args.teacher_model_name_or_path)}-{args.optimizer}-lr{args.learning_rate}-{args.lr_num_cycles}-drop{args.drop_text_rate}&{args.drop_tag_rate}&{args.drop_char_feature_rate}-{args.mixed_precision}-{args.lr_scheduler}-SS{args.sigmas_scale}-n{args.inference_steps}' + '-TEST'*bool(args.quick_test) + '-te'*bool(args.use_teacher_text_encoder) 
@@ -843,114 +833,243 @@ def main(args):
             sigma = sigma.unsqueeze(-1)
         return sigma
 
-    # train_dataloader_超 = 超源(cycle(train_dataloader), text_encoders, tokenizers, accelerator)
-    train_dataloader_超 = cycle(train_dataloader)
+    def 超源(it, text_encoders, tokenizers, accelerator):
+        batch_buffer = []
+        while True:
+            if not batch_buffer:
+                transformer.to('cpu')
+                with torch.no_grad():
+                    for _ in range(args.prefetch_steps):
+                        batch = next(it)
+                        batch_buffer.append(batch)
+                        if random.random() < args.drop_text_rate:
+                            batch['prompts'] = ['' for _ in batch['prompts']]
+
+                    for i in text_encoders:
+                        i.to(accelerator.device)
+                    for batch in batch_buffer:
+                        batch['prompt_embeds'], batch['pooled_prompt_embeds'], batch['text_ids'] = compute_text_embeddings(batch['prompts'], text_encoders, tokenizers)
+                    for i in text_encoders:
+                        i.to('cpu')
+
+                    for i in [教师pipeline.text_encoder, 教师pipeline.text_encoder_2]:
+                        i.to(accelerator.device)
+                    for batch in batch_buffer:
+                        batch['sdxl_prompt_embeds'], batch['sdxl_pooled_prompt_embeds'] = [i.cpu() for i in encode_prompt_sdxl(batch['prompts'], 教师pipeline的compel)]
+                    for i in [教师pipeline.text_encoder, 教师pipeline.text_encoder_2]:
+                        i.to('cpu')
+                    clean()
+
+                    for i in [vae, 教师pipeline.vae, 教师pipeline.unet]:
+                        i.to(accelerator.device)
+                    for batch in batch_buffer:
+                        pixel_values = batch["pixel_values"].to(dtype=vae.dtype)
+                        with 计时(accelerator, global_step, 'vae_time'):
+                            x0 = vae.encode(pixel_values).latent_dist.mean
+                            x0 = (x0 - vae.config.shift_factor) * vae.config.scaling_factor
+                            x0 = x0.to(torch.float32)
+                        with 计时(accelerator, global_step, 'vae2_time'):
+                            x0小 = 教师pipeline.vae.encode(pixel_values.to(教师pipeline.vae.dtype)).latent_dist.mean
+                            x0小 = x0小 * 教师pipeline.vae.config.scaling_factor
+                            x0小 = x0小.to(torch.float32)
+                        noise = torch.randn_like(x0)
+                        noise小 = noise.unflatten(1, (4, 4)).mean(dim=2) * 2
+                        bsz = x0.shape[0]
+                        assert bsz == 1
+
+                        u = compute_density_for_timestep_sampling(
+                            weighting_scheme=args.weighting_scheme,
+                            batch_size=bsz,
+                            logit_mean=args.logit_mean,
+                            logit_std=args.logit_std,
+                            mode_scale=args.mode_scale,
+                        )
+                        indices = (u * noise_scheduler_copy.config.num_train_timesteps).long()
+                        timesteps = noise_scheduler_copy.timesteps[indices].to(device=x0.device)
+
+                        sigmas = get_sigmas(timesteps, n_dim=x0.ndim, dtype=x0.dtype)
+                        noisy_model_input = (1.0 - sigmas) * x0 + sigmas * noise
+
+                        x0小_std = x0小.std()
+                        x0_std = x0.std()
+                        sigmas小 = sigmas*x0小_std / (-sigmas*x0_std + sigmas*x0小_std + x0_std) * args.sigmas_scale
+                        估计方差 = (1.0 - sigmas小) ** 2 + sigmas小 ** 2
+                        k = 1 / 估计方差**0.5
+
+                        初始beta = (sigmas小 * k) ** 2
+                        教师pred_x0 = x0小
+                        torch.cuda.empty_cache()
+                        for i in range(args.inference_steps):
+                            beta = 初始beta * (1 - i / args.inference_steps)
+                            alpha = 1 - beta
+                            if i == 0:
+                                noisy_model_input小 = alpha**0.5 * 教师pred_x0 + beta**0.5 * noise小
+                            else:
+                                noisy_model_input小 = alpha**0.5 * 教师pred_x0 + beta**0.5 * 教师pred
+                            with 计时(accelerator, global_step, 'unet_time'):
+                                add_time_ids = torch.cat(
+                                    [compute_time_ids(s, r, c) for s, r, c in zip(batch["original_sizes"], batch["resized_sizes"], batch["crop_top_lefts"])]
+                                ).to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype)
+
+                                timesteps小 = min(range(0, 1000), key=lambda x: abs(alpha - sdxl_time_to_alpha[x]))
+
+                                教师pred = 教师pipeline.unet(
+                                    noisy_model_input小.to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype),
+                                    timesteps小,
+                                    batch['sdxl_prompt_embeds'].to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype),
+                                    added_cond_kwargs={"time_ids": add_time_ids, "text_embeds": batch['sdxl_pooled_prompt_embeds'].to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype)},
+                                    return_dict=False,
+                                )[0].detach().clone().to(torch.float32)
+
+                                教师pred_x0 = (noisy_model_input小 - beta**0.5 * 教师pred) / alpha**0.5
+
+                        latents_to_decode = 教师pred_x0 / 教师pipeline.vae.config.scaling_factor
+                        image_pixels = 教师pipeline.vae.decode(latents_to_decode, return_dict=False)[0]
+
+                        if args.quick_test:
+                            print('-'*10, f'对比', '-'*10)
+                            print(f'时间 {timesteps=} {timesteps小=}', )
+                            print(f'sigmas {sigmas=} {sigmas小=}')
+                            print('noisy_model_input小', noisy_model_input小.mean(), noisy_model_input小.var())
+                            print('教师pred', 教师pred.mean(), 教师pred.var())
+                            print('noise小', noise小.mean(), noise小.var())
+                            print('教师pred_x0', 教师pred_x0.mean(), 教师pred_x0.var())
+                            print('x0小', x0小.mean(), x0小.var())
+                            image = 教师pipeline.image_processor.postprocess(image_pixels, output_type='pil')[0]
+                            image.save(f'rum_flux/{int(timesteps)}_教师pred_x0_pixels.png')
+                            batch["原本images"][0].save(f'rum_flux/{int(timesteps)}_原本.png')
+
+                        image_pixels = torch.clamp(image_pixels, min=-1.0, max=1.0)
+                        target_dist = vae.encode(image_pixels.to(vae.dtype)).latent_dist
+                        target_x0_flux = target_dist.mean
+                        target_x0_flux = (target_x0_flux - vae.config.shift_factor) * vae.config.scaling_factor
+                        target = target_x0_flux.to(dtype=transformer.dtype)
+                        batch['timesteps'] = timesteps.to('cpu')
+                        batch['noise'] = noise.to('cpu')
+                        batch['noisy_model_input'] = noisy_model_input.to('cpu')
+                        batch['target'] = target.to('cpu')
+                        batch['sigmas'] = sigmas
+                    for i in [vae, 教师pipeline.vae, 教师pipeline.unet]:
+                        i.to('cpu')
+                    clean()
+                transformer.to(accelerator.device)
+            else:
+                yield from batch_buffer
+                batch_buffer = []
+
+    train_dataloader_超 = 超源(cycle(train_dataloader), text_encoders, tokenizers, accelerator)
 
     transformer.train()
     while global_step <= args.max_train_steps:
-        batch = next(train_dataloader_超)
-        models_to_accumulate = [transformer]
-        with accelerator.accumulate(models_to_accumulate):
-            pixel_values = batch["pixel_values"].to(dtype=vae.dtype)
-            prompts = batch["prompts"]
-            prompt_embeds, pooled_prompt_embeds, text_ids = compute_text_embeddings(
-                prompts, text_encoders, tokenizers
+        with 计时(accelerator, global_step, 'step_time'):
+            batch = next(train_dataloader_超)
+            models_to_accumulate = [transformer]
+            with accelerator.accumulate(models_to_accumulate):
+                model_input = batch['target'].to(accelerator.device)
+
+                vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
+                latent_image_ids = FluxPipeline._prepare_latent_image_ids(
+                    model_input.shape[0],
+                    model_input.shape[2] // 2,
+                    model_input.shape[3] // 2,
+                    accelerator.device,
+                    weight_dtype,
+                )
+
+                bsz = model_input.shape[0]
+
+                u = compute_density_for_timestep_sampling(
+                    weighting_scheme=args.weighting_scheme,
+                    batch_size=bsz,
+                    logit_mean=args.logit_mean,
+                    logit_std=args.logit_std,
+                    mode_scale=args.mode_scale,
+                )
+                packed_noisy_model_input = FluxPipeline._pack_latents(
+                    model_input,
+                    batch_size=model_input.shape[0],
+                    num_channels_latents=model_input.shape[1],
+                    height=model_input.shape[2],
+                    width=model_input.shape[3],
+                )
+
+                if unwrap_model(transformer).config.guidance_embeds:
+                    guidance = torch.tensor([args.guidance_scale], device=accelerator.device)
+                    guidance = guidance.expand(model_input.shape[0])
+                else:
+                    guidance = None
+
+                model_pred = transformer(
+                    hidden_states=packed_noisy_model_input,
+                    timestep=batch['timesteps'].to(accelerator.device) / 1000,
+                    guidance=guidance,
+                    pooled_projections=batch['pooled_prompt_embeds'].to(accelerator.device),
+                    encoder_hidden_states=batch['prompt_embeds'].to(accelerator.device),
+                    txt_ids=batch['text_ids'],
+                    img_ids=latent_image_ids,
+                    return_dict=False,
+                )[0]
+                model_pred = FluxPipeline._unpack_latents(
+                    model_pred,
+                    height=model_input.shape[2] * vae_scale_factor,
+                    width=model_input.shape[3] * vae_scale_factor,
+                    vae_scale_factor=vae_scale_factor,
+                )
+                weighting = compute_loss_weighting_for_sd3(weighting_scheme=args.weighting_scheme, sigmas=batch['sigmas'])
+
+                target = batch['noise'].to(accelerator.device) - model_input
+
+                loss = torch.mean(
+                    (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1),
+                    1,
+                )
+                loss = loss.mean()
+
+                accelerator.backward(loss)
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(transformer.parameters(), args.max_grad_norm)
+
+                with 计时(accelerator, global_step, 'optimizer_step_time'):
+                    optimizer.step()
+                    lr_scheduler.step()
+                    optimizer.zero_grad()
+
+            if global_step % 40 == 20:
+                clean()
+                accelerator.log({"memory_allocated": torch.cuda.memory_allocated() / 1024**3, "memory_reserved": torch.cuda.memory_reserved() / 1024**3}, step=global_step)
+
+        if accelerator.is_main_process and (global_step % args.validation_steps == 0 or global_step in [args.validation_steps // 2]):
+            text_encoder_one.to(accelerator.device)
+            text_encoder_two.to(accelerator.device)
+            transformer.to(accelerator.device)
+            vae.to(accelerator.device)
+            pipeline = FluxPipeline.from_pretrained(
+                args.pretrained_model_name_or_path,
+                vae=vae,
+                text_encoder=unwrap_model(text_encoder_one),
+                text_encoder_2=unwrap_model(text_encoder_two),
+                transformer=unwrap_model(transformer),
+                revision=args.revision,
+                variant=args.variant,
+                torch_dtype=weight_dtype,
             )
-
-            model_input = vae.encode(pixel_values).latent_dist.sample()
-            model_input = (model_input - vae.config.shift_factor) * vae.config.scaling_factor
-            model_input = model_input.to(dtype=weight_dtype)
-
-            vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
-
-            latent_image_ids = FluxPipeline._prepare_latent_image_ids(
-                model_input.shape[0],
-                model_input.shape[2] // 2,
-                model_input.shape[3] // 2,
-                accelerator.device,
-                weight_dtype,
-            )
-
-            noise = torch.randn_like(model_input)
-            bsz = model_input.shape[0]
-
-            u = compute_density_for_timestep_sampling(
-                weighting_scheme=args.weighting_scheme,
-                batch_size=bsz,
-                logit_mean=args.logit_mean,
-                logit_std=args.logit_std,
-                mode_scale=args.mode_scale,
-            )
-            indices = (u * noise_scheduler_copy.config.num_train_timesteps).long()
-            timesteps = noise_scheduler_copy.timesteps[indices].to(device=model_input.device)
-
-            sigmas = get_sigmas(timesteps, n_dim=model_input.ndim, dtype=model_input.dtype)
-            noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
-
-            packed_noisy_model_input = FluxPipeline._pack_latents(
-                noisy_model_input,
-                batch_size=model_input.shape[0],
-                num_channels_latents=model_input.shape[1],
-                height=model_input.shape[2],
-                width=model_input.shape[3],
-            )
-
-            if unwrap_model(transformer).config.guidance_embeds:
-                guidance = torch.tensor([args.guidance_scale], device=accelerator.device)
-                guidance = guidance.expand(model_input.shape[0])
-            else:
-                guidance = None
-
-            model_pred = transformer(
-                hidden_states=packed_noisy_model_input,
-                timestep=timesteps / 1000,
-                guidance=guidance,
-                pooled_projections=pooled_prompt_embeds,
-                encoder_hidden_states=prompt_embeds,
-                txt_ids=text_ids,
-                img_ids=latent_image_ids,
-                return_dict=False,
-            )[0]
-            model_pred = FluxPipeline._unpack_latents(
-                model_pred,
-                height=model_input.shape[2] * vae_scale_factor,
-                width=model_input.shape[3] * vae_scale_factor,
-                vae_scale_factor=vae_scale_factor,
-            )
-            weighting = compute_loss_weighting_for_sd3(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
-
-            target = noise - model_input
-
-            loss = torch.mean(
-                (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1),
-                1,
-            )
-            loss = loss.mean()
-
-            accelerator.backward(loss)
-            if accelerator.sync_gradients:
-                accelerator.clip_grad_norm_(transformer.parameters(), args.max_grad_norm)
-
-            optimizer.step()
-            lr_scheduler.step()
-            optimizer.zero_grad()
-
-        if accelerator.sync_gradients:
-            progress_bar.update(1)
-            global_step += 1
-            accelerator.log({"len_tag": batch['prompts'][0].count(','), "t": timesteps[0]}, step=global_step)
-            if accelerator.is_main_process:
-                if global_step % args.checkpointing_steps == 0:
-                    save_path = os.path.join(checkpoint_dir, f"checkpoint-{global_step}")
-                    accelerator.save_state(save_path)
+            log_validation(pipeline, accelerator, global_step)
+            text_encoder_one.to('cpu')
+            text_encoder_two.to('cpu')
+            transformer.to(accelerator.device)
+            vae.to('cpu')
 
         logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
         progress_bar.set_postfix(**logs)
         accelerator.log(logs, step=global_step)
-
-        if accelerator.is_main_process:
-            # log_validation
-            ...
+        if accelerator.sync_gradients:
+            progress_bar.update(1)
+            accelerator.log({"len_tag": batch['prompts'][0].count(','), "t": batch['timesteps'][0]}, step=global_step)
+            global_step += 1
+            if accelerator.is_main_process:
+                if global_step % args.checkpointing_steps == 0:
+                    save_path = os.path.join(checkpoint_dir, f"checkpoint-{global_step}")
+                    accelerator.save_state(save_path)
 
 
 if __name__ == "__main__":
