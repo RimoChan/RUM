@@ -37,15 +37,15 @@
 
 做完映射之后，接下来要来决定训练的目标，这里有2种做法，第1种是比较接近原版的diffusion，就叫它diffusion形式好了，具体是这样:
 
-1. 【在SD3的Latent空间】随机选1个样本，随机选1个噪声，插值出1个Xt。
+1. 【在SD3.5的Latent空间】随机选1个样本，随机选1个噪声，插值出1个Xt。
 2. 【在SDXL的Latent空间】通过映射得到样本和噪声，插出1个Xt2，然后用SDXL对着Xt2预测n步，得到X02。
-3. 【在SD3的Latent空间】再把X02映射回来，用它减去第1步的Xt算出V。
+3. 【在SD3.5的Latent空间】再把X02映射回来，用它减去第1步的Xt算出V。
 
 第2种做法比较接近reflow，就叫reflow形式吧，具体是这样:
 
-1. 【在SD3的Latent空间】随机选1个噪声，把样本丢掉。
+1. 【在SD3.5的Latent空间】随机选1个噪声，把样本丢掉。
 2. 【在SDXL的Latent空间】通过映射得到噪声，用SDXL对着噪声预测n步，得到X02。
-3. 【在SD3的Latent空间】把X02映射回来，用它和第1步的噪声插值出1个Xt，用X02-Xt算出V。
+3. 【在SD3.5的Latent空间】把X02映射回来，用它和第1步的噪声插值出1个Xt，用X02-Xt算出V。
 
 1开始写的是diffusion形式，不过试下来发现reflow形式收敛的速度和效果都要更好<sub>(下面有对比)</sub>。
 
@@ -64,18 +64,23 @@
 
 训练的两个模型分别是[stable-diffusion-3.5-medium](https://huggingface.co/stabilityai/stable-diffusion-3.5-medium)和[WAI-illustrious-SDXL](https://civitai.com/models/827184)，训练数据是danbooru2024抽了1个很小的子集，总共就47k数据。
 
-这里我为了让它快1点，提前训了1个SDXL的步数蒸馏模型把原版SDXL替换掉<sub>(我用的是[这个](https://github.com/G-U-N/Rectified-Diffusion)</sub>，实际上每个训练step也都只推理2~4个step，不会慢太多。当然，用原始的50个step的版本也可以训练，不过很慢所以还是建议先做1遍步数蒸馏，通常只要1~2天即可。
+这里我为了让它快1点，提前训了1个SDXL的步数蒸馏模型把原版SDXL替换掉<sub>(我用的是[这个](https://github.com/G-U-N/Rectified-Diffusion)</sub>，实际上每个训练step也都只推理2-4个step，不会慢太多。当然，用原始的50个step的版本也可以训练，不过很慢所以还是建议先做1遍步数蒸馏，通常只要1-2天即可。
 
-因为微调动漫模型的人1般不公开数据集，所以没有办法测FID。模型评估用的是ML-Danbooru，它是1个标签模型，评估方法是先用标签构造1组prompt，让sd3.5生成之后再检测图像中有没有对应的标签，最终的分数就是`命中的标签 / 所有的标签`。
+因为微调动漫模型的人1般不公开数据集，所以没有办法测FID。模型评估用的是ML-Danbooru，它是1个标签模型，评估方法是先用标签构造1组prompt，让SD3.5生成之后再检测图像中有没有对应的标签，最终的分数就是`命中的标签 / 所有的标签`。
 
-下面是不同参数下的得分对step的曲线，从上到下4条线分别是: 
+下面是不同参数下的得分对step的曲线，从上到下4条线代表的4个实验分别是: 
 
 1. reflow形式+替换CLIP。
 2. diffusion形式+替换CLIP。
 3. diffusion形式+不替换CLIP。
 4. 去除teacher<sub>(即使用原始的diffusion loss)</sub>
 
-![img/分数.png](img/分数.png)
+![img/分数.webp](img/分数.webp)
+
+
+右边那几个彩色的线其实是用diffusion形式训了几天，然后觉得不对又换成reflow形式导致的。 <sub>(所以你们能猜到实验1其实反而是最后补的)</sub>
+
+
 
 
 ## 看1看出图效果
@@ -85,19 +90,28 @@
 来看几个case:
 
 
-<img align='right' src='img/1.webp' width='500px'>
+---
+
+<img src='img/1.webp' width='400px'>
+
 - 可爱的小桃！
 - prompt是`1girl, momoi \(blue archive\), typing on computer keyboard, sitting,  angry, animal ear headphones, white jacket, necktie, shirt, indoors,table, momoko \(momopoco\), newest`
 - 手指完全崩溃了，光环的形状也不对，还有这个电脑放在左边是要看什么！
 - `typing on computer keyboard` 这个短语其实不在danbooru tags里，OOD的能力应该是从SD3.5m那里继承过来的。
 - 这里有画师名，训练的时候其实是带画师名的，不过看来它在这方面的学习并不是很好。
 
-<img align='right' src='img/2.webp' width='500px'>
+---
+
+<img src='img/2.webp' width='400px'>
+
 - 可爱的邮箱！
 - prompt是`1girl, yuuka \(blue archive\), fullbody, table, white jacket, black skirt, holding cup, sitting, indoors, cafe, plant, newest`
 - 这张手稍微好点不过也没有好太多，还有桌子上那是什么东西！
 
-<img align='right' src='img/3.webp' width='500px'>
+---
+
+<img src='img/3.webp' width='400px'>
+
 - 可爱的灵梦！
 - prompt是`1girl, hakurei reimu, outdoors, mountain, torii, smile, waving, momoko \(momopoco\), newest`
 - 算了我不继续吐槽自己了你们用眼睛看吧！
@@ -105,12 +119,13 @@
 此外，颜色偏淡是教师模型的问题，教师模型虽然是蒸馏时是带CFG的，但是合理的CFG仍然在1.5左右，我为了让它跑得快1点把CFG设成1了。
 
 
-## 使用方式
+## 如何启动训练
 
 首先你要有Python和torch。我的版本是Python3.10和torch 2.9.1+cu130，这个代码应该不挑版本，你自己的能跑就行。
 
 首先`pip install -r requirements.txt`装1下依赖，然后`go.sh`里面是启动命令，里面的参数基本上就是字面上的意思，大家有训过原版的应该都比较清楚，总之把数据集和模型的路径改1改就可以跑了。
 
+不过就不要再训什么SD3.5了，diffusers的仓库里其实有z-image和flux klein的训练代码，大家可以参考我的代码去试着适配1下！
 
 ## 1些问题
 
