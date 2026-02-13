@@ -2,10 +2,10 @@ import os
 import time
 import copy
 import math
+import shutil
 import random
 import logging
 import argparse
-import warnings
 from pathlib import Path
 
 from datasets import load_dataset
@@ -17,8 +17,6 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration, set_seed
 from huggingface_hub import create_repo
-from torch.utils.data import Dataset
-from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModelWithProjection, CLIPTokenizer, PretrainedConfig, T5EncoderModel, T5TokenizerFast
 
@@ -31,9 +29,8 @@ from diffusers.utils.torch_utils import is_compiled_module
 from compel import Compel, ReturnedEmbeddingsType
 
 from dan后处理 import dan后处理
-from common import 计时, 哈, cycle, clean, sdxl_time_to_alpha, 生成optimizer, 评测pipeline, add_image_jpeg, validation_prompt
+from common import 计时, 哈, cycle, clean, sdxl_time_to_alpha, 生成optimizer, 评测pipeline, add_image_jpeg, validation_prompt, cosine_with_restart_scheduler改
 from common import encode_prompt as encode_prompt_sdxl
-from tread_sd3 import patch_sd3_tread
 
 import muon
 muon.zeropower_via_newtonschulz5 = torch.compile(muon.zeropower_via_newtonschulz5)
@@ -72,7 +69,7 @@ def log_validation(
                 width=704,
                 height=1024,
             ).images[0])
-            clean()
+        clean()
         if global_step > 0:
             pipeline.set_progress_bar_config(disable=True)
             分数 = 评测pipeline(pipeline, n_iter=args.validation_n_iter, guidance_scale_range=(guidance_scale, guidance_scale+2))
@@ -142,37 +139,8 @@ def parse_args(input_args=None):
         help="Variant of the model files of the pretrained model identifier from huggingface.co/models, 'e.g.' fp16",
     )
     parser.add_argument(
-        "--image_column",
-        type=str,
-        default="image",
-        help="The column of the dataset containing the target image. By "
-        "default, the standard Image Dataset maps out 'file_name' "
-        "to 'image'.",
-    )
-    parser.add_argument(
-        "--caption_column",
-        type=str,
-        default=None,
-        help="The column of the dataset containing the instance prompt for each image",
-    )
-    parser.add_argument(
         "--train_data_dir",
         type=str,
-    )
-    parser.add_argument("--repeats", type=int, default=1, help="How many times to repeat the training data.")
-
-    parser.add_argument(
-        "--class_data_dir",
-        type=str,
-        default=None,
-        required=False,
-        help="A folder containing the training data of class images.",
-    )
-    parser.add_argument(
-        "--class_prompt",
-        type=str,
-        default=None,
-        help="The prompt to specify images in the same class as provided instance images.",
     )
     parser.add_argument(
         "--max_sequence_length",
@@ -194,22 +162,6 @@ def parse_args(input_args=None):
         "--prefetch_steps",
         type=int,
         default=50,
-    )
-    parser.add_argument(
-        "--with_prior_preservation",
-        default=False,
-        action="store_true",
-        help="Flag to add prior preservation loss.",
-    )
-    parser.add_argument("--prior_loss_weight", type=float, default=1.0, help="The weight of prior preservation loss.")
-    parser.add_argument(
-        "--num_class_images",
-        type=int,
-        default=100,
-        help=(
-            "Minimal class images for prior preservation loss. If there are not enough images already present in"
-            " class_data_dir, additional images will be sampled with class_prompt."
-        ),
     )
     parser.add_argument(
         "--output_dir",
@@ -460,26 +412,26 @@ def parse_args(input_args=None):
     )
 
     parser.add_argument(
-        "--tread_a",
-        type=int,
-        default=4,
-    )
-    parser.add_argument(
-        "--tread_b",
-        type=int,
-        default=18,
-    )
-    parser.add_argument(
-        "--tread_p",
-        type=float,
-        default=0,
-    )
-    parser.add_argument(
         "--use_teacher_text_encoder",
         action="store_true",
         default=False,
     )
-
+    parser.add_argument(
+        "--checkpoints_total_limit",
+        type=int,
+        default=None,
+    )
+    parser.add_argument(
+        "--reflow",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--teacher_cfg",
+        type=float,
+        default=1,
+    )
+    
     if input_args is not None:
         args = parser.parse_args(input_args)
     else:
@@ -488,11 +440,6 @@ def parse_args(input_args=None):
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
         args.local_rank = env_local_rank
-
-    if args.class_data_dir is not None:
-        warnings.warn("You need not use --class_data_dir without --with_prior_preservation.")
-    if args.class_prompt is not None:
-        warnings.warn("You need not use --class_prompt without --with_prior_preservation.")
 
     return args
 
@@ -504,14 +451,12 @@ def collate_fn(examples):
     original_sizes = [example["original_sizes"] for example in examples]
     resized_sizes = [example["resized_sizes"] for example in examples]
     crop_top_lefts = [example["crop_top_lefts"] for example in examples]
-    原本images = [example["原本images"] for example in examples]
     batch = {
         "pixel_values": pixel_values,
         "prompts": prompts,
         "original_sizes": original_sizes,
         "resized_sizes": resized_sizes,
         "crop_top_lefts": crop_top_lefts,
-        "原本images": 原本images,
     }
     return batch
 
@@ -871,7 +816,8 @@ def main(args):
         train_dataset,
         batch_size=args.train_batch_size,
         shuffle=True,
-        collate_fn=lambda examples: collate_fn(examples),
+        collate_fn=collate_fn,
+        prefetch_factor=args.prefetch_steps + 2,
         num_workers=args.dataloader_num_workers,
     )
 
@@ -891,13 +837,11 @@ def main(args):
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
         overrode_max_train_steps = True
 
-    lr_scheduler = get_scheduler(
-        args.lr_scheduler,
+    lr_scheduler = cosine_with_restart_scheduler改(
         optimizer=optimizer,
         num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
         num_training_steps=args.max_train_steps * accelerator.num_processes,
         num_cycles=args.lr_num_cycles,
-        power=args.lr_power,
     )
 
     transformer, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
@@ -911,10 +855,7 @@ def main(args):
     # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
-    特征 = f'{哈(args.train_data_dir)}-{哈(args.pretrained_model_name_or_path)}-{哈(args.teacher_model_name_or_path)}-{args.optimizer}-lr{args.learning_rate}-{args.lr_num_cycles}-drop{args.drop_text_rate}&{args.drop_tag_rate}&{args.drop_char_feature_rate}-{args.mixed_precision}-{args.lr_scheduler}-SS{args.sigmas_scale}-n{args.inference_steps}' + '-TEST'*bool(args.quick_test) + '-te'*bool(args.use_teacher_text_encoder) 
-    if args.tread_p:
-        特征 += f'-T{args.tread_a}_{args.tread_b}_{args.tread_p}'
-        patch_sd3_tread(transformer, args.tread_a, args.tread_b, args.tread_p)
+    特征 = f'{哈(args.train_data_dir)}-{哈(args.pretrained_model_name_or_path)}-{哈(args.teacher_model_name_or_path)}-{args.optimizer}-lr{args.learning_rate}-{args.lr_num_cycles}-drop{args.drop_text_rate}&{args.drop_tag_rate}&{args.drop_char_feature_rate}-{args.mixed_precision}-{args.lr_scheduler}-SS{args.sigmas_scale}-n{args.inference_steps}-cfg{args.teacher_cfg}' + '-TEST'*bool(args.quick_test) + '-te'*bool(args.use_teacher_text_encoder) + '-rf'*bool(args.reflow)
     if accelerator.is_main_process:
         accelerator.init_trackers(f'T2I-{特征}', config=vars(args))
     checkpoint_dir = os.path.join(args.output_dir, 特征)
@@ -947,13 +888,11 @@ def main(args):
                     group["lr"] = group["initial_lr"] = args.override_learning_rate
                 else:
                     group["lr"] = group["initial_lr"] =  args.override_learning_rate * 40
-            lr_scheduler = get_scheduler(
-                args.lr_scheduler,
+            lr_scheduler = cosine_with_restart_scheduler改(
                 optimizer=optimizer,
                 num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
                 num_training_steps=args.max_train_steps * accelerator.num_processes,
                 num_cycles=args.lr_num_cycles,
-                power=args.lr_power,
                 last_epoch=global_step,
             )
             lr_scheduler = accelerator.prepare(lr_scheduler)
@@ -980,124 +919,173 @@ def main(args):
 
     def 超源(it, text_encoders, tokenizers, accelerator):
         batch_buffer = []
+        teacher_nega_prompt_embeds, teacher_nega_pooled_prompt_embeds = [i.cpu() for i in encode_prompt_sdxl([''], 教师pipeline的compel)]
         while True:
             if not batch_buffer:
                 transformer.to('cpu')
                 with torch.no_grad():
-                    for _ in range(args.prefetch_steps):
-                        batch = next(it)
-                        batch_buffer.append(batch)
-                        if random.random() < args.drop_text_rate:
-                            batch['prompts'] = ['' for _ in batch['prompts']]
+                    with 计时(accelerator, global_step, 'dataloader'):
+                        while len(batch_buffer) < args.prefetch_steps:
+                            batch = next(it)
+                            h, w = batch["pixel_values"].shape[2:]
+                            if h / w > 4 or w / h > 4:
+                                continue
+                            batch_buffer.append(batch)
+                            batch['teacher_prompts'] = batch['prompts'].copy()
+                            if random.random() < args.drop_text_rate:
+                                batch['prompts'] = ['' for _ in batch['prompts']]
+                                if not args.reflow:
+                                    batch['teacher_prompts'] = ['' for _ in batch['teacher_prompts']]
+                    with 计时(accelerator, global_step, 'TE_to_CUDA_1'):
+                        for i in text_encoders:
+                            i.to(accelerator.device)
+                    with 计时(accelerator, global_step, 'prepare_text_emb_1'):
+                        for batch in batch_buffer:
+                            batch['prompt_embeds'], batch['pooled_prompt_embeds'] = [i.cpu() for i in compute_text_embeddings(batch['prompts'], text_encoders, tokenizers)]
+                    with 计时(accelerator, global_step, 'TE_to_CPU_1'):
+                        for i in text_encoders:
+                            i.to('cpu')
+                    with 计时(accelerator, global_step, 'TE_to_CUDA_2'):
+                        for i in [教师pipeline.text_encoder, 教师pipeline.text_encoder_2]:
+                            i.to(accelerator.device)
+                    with 计时(accelerator, global_step, 'prepare_text_emb_2'):
+                        for i, batch in enumerate(batch_buffer):
+                            batch['sdxl_prompt_embeds'], batch['sdxl_pooled_prompt_embeds'] = [i.cpu() for i in encode_prompt_sdxl(batch['teacher_prompts'], 教师pipeline的compel)]
+                            accelerator.log({"len_token": len(tokenizer_two(batch['prompts'])['input_ids'][0])}, step=global_step + i)
 
-                    for i in text_encoders:
-                        i.to(accelerator.device)
-                    for batch in batch_buffer:
-                        batch['prompt_embeds'], batch['pooled_prompt_embeds'] = [i.cpu() for i in compute_text_embeddings(batch['prompts'], text_encoders, tokenizers)]
-                    for i in text_encoders:
-                        i.to('cpu')
-                    for i in [教师pipeline.text_encoder, 教师pipeline.text_encoder_2]:
-                        i.to(accelerator.device)
-                    for batch in batch_buffer:
-                        batch['sdxl_prompt_embeds'], batch['sdxl_pooled_prompt_embeds'] = [i.cpu() for i in encode_prompt_sdxl(batch['prompts'], 教师pipeline的compel)]
-                    for i in [教师pipeline.text_encoder, 教师pipeline.text_encoder_2]:
-                        i.to('cpu')
-                    clean()
+                    with 计时(accelerator, global_step, 'TE_to_CPU_2'):
+                        for i in [教师pipeline.text_encoder, 教师pipeline.text_encoder_2]:
+                            i.to('cpu')
 
-                    for i in [vae, 教师pipeline.vae, 教师pipeline.unet]:
-                        i.to(accelerator.device)
-                    for batch in batch_buffer:
-                        pixel_values = batch["pixel_values"].to(dtype=vae.dtype)
-                        with 计时(accelerator, global_step, 'vae_time'):
-                            x0 = vae.encode(pixel_values).latent_dist.mean
-                            x0 = (x0 - vae.config.shift_factor) * vae.config.scaling_factor
-                            x0 = x0.to(torch.float32)
-                        with 计时(accelerator, global_step, 'vae2_time'):
-                            x0小 = 教师pipeline.vae.encode(pixel_values).latent_dist.mean
-                            x0小 = x0小 * 教师pipeline.vae.config.scaling_factor
-                            x0小 = x0小.to(torch.float32)
-                        noise = torch.randn_like(x0)
-                        noise小 = noise.unflatten(1, (4, 4)).mean(dim=2) * 2
-                        bsz = x0.shape[0]
-                        assert bsz == 1
+                    with 计时(accelerator, global_step, 'prepare_latent'):
+                        for i in [vae, 教师pipeline.vae, 教师pipeline.unet]:
+                            i.to(accelerator.device)
+                        for batch in batch_buffer:
+                            pixel_values = batch["pixel_values"].to(dtype=vae.dtype)
+                            with 计时(accelerator, global_step, 'vae1'):
+                                x0 = vae.encode(pixel_values).latent_dist.mean
+                                x0 = (x0 - vae.config.shift_factor) * vae.config.scaling_factor
+                                x0 = x0.to(torch.float32)
+                            with 计时(accelerator, global_step, 'vae2'):
+                                x0小 = 教师pipeline.vae.encode(pixel_values).latent_dist.mean
+                                x0小 = x0小 * 教师pipeline.vae.config.scaling_factor
+                                x0小 = x0小.to(torch.float32)
+                            noise = torch.randn_like(x0)
+                            noise小 = noise.unflatten(1, (4, 4)).mean(dim=2) * 2
+                            bsz = x0.shape[0]
+                            assert bsz == 1
 
-                        u = compute_density_for_timestep_sampling(
-                            weighting_scheme=args.weighting_scheme,
-                            batch_size=bsz,
-                            logit_mean=args.logit_mean,
-                            logit_std=args.logit_std,
-                            mode_scale=args.mode_scale,
-                        )
-                        indices = (u * noise_scheduler_copy.config.num_train_timesteps).long()
-                        timesteps = noise_scheduler_copy.timesteps[indices].to(device=x0.device)
+                            u = compute_density_for_timestep_sampling(
+                                weighting_scheme=args.weighting_scheme,
+                                batch_size=bsz,
+                                logit_mean=args.logit_mean,
+                                logit_std=args.logit_std,
+                                mode_scale=args.mode_scale,
+                            )
+                            indices = (u * noise_scheduler_copy.config.num_train_timesteps).long()
+                            timesteps = noise_scheduler_copy.timesteps[indices].to(device=x0.device)
 
-                        sigmas = get_sigmas(timesteps, n_dim=x0.ndim, dtype=x0.dtype)
-                        noisy_model_input = (1.0 - sigmas) * x0 + sigmas * noise
+                            sigmas = get_sigmas(timesteps, n_dim=x0.ndim, dtype=x0.dtype)
 
-                        x0小_std = x0小.std()
-                        x0_std = x0.std()
-                        # 原本想让输入对齐信噪比，但是好像不是很有效，干脆乘个常数算了，看起来一样就行
-                        sigmas小 = sigmas*x0小_std / (-sigmas*x0_std + sigmas*x0小_std + x0_std) * args.sigmas_scale
-                        估计方差 = (1.0 - sigmas小) ** 2 + sigmas小 ** 2
-                        k = 1 / 估计方差**0.5   # 保持信噪比不变，将方差缩放到1
+                            torch.cuda.empty_cache()
+                            if args.reflow:
+                                初始beta = 1 - 0.02
+                                for i in range(args.inference_steps):
+                                    beta = 初始beta * (1 - i / args.inference_steps)
+                                    alpha = 1 - beta
+                                    if i == 0:
+                                        noisy_model_input小 = noise小
+                                    else:
+                                        noisy_model_input小 = alpha**0.5 * 教师pred_x0 + beta**0.5 * 教师pred
+                                    with 计时(accelerator, global_step, 'unet'):
+                                        add_time_ids = torch.cat(
+                                            [compute_time_ids(s, r, c) for s, r, c in zip(batch["original_sizes"], batch["resized_sizes"], batch["crop_top_lefts"])]
+                                        ).to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype)
 
-                        # noisy_model_input小 = (1.0 - sigmas小) * k * x0小 + sigmas小 * k * noise小
-                        初始beta = (sigmas小 * k) ** 2
-                        教师pred_x0 = x0小
-                        torch.cuda.empty_cache()
-                        for i in range(args.inference_steps):
-                            beta = 初始beta * (1 - i / args.inference_steps)
-                            alpha = 1 - beta
-                            if i == 0:
-                                noisy_model_input小 = alpha**0.5 * 教师pred_x0 + beta**0.5 * noise小
+                                        timesteps小 = min(range(0, 1000), key=lambda x: abs(alpha - sdxl_time_to_alpha[x]))
+
+                                        教师pred = 教师pipeline.unet(
+                                            noisy_model_input小.to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype),
+                                            timesteps小,
+                                            batch['sdxl_prompt_embeds'].to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype),
+                                            added_cond_kwargs={"time_ids": add_time_ids, "text_embeds": batch['sdxl_pooled_prompt_embeds'].to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype)},
+                                            return_dict=False,
+                                        )[0].detach().clone().to(torch.float32)
+                                        if args.teacher_cfg > 1:
+                                            教师pred_uncond = 教师pipeline.unet(
+                                                noisy_model_input小.to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype),
+                                                timesteps小,
+                                                teacher_nega_prompt_embeds.to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype),
+                                                added_cond_kwargs={"time_ids": add_time_ids, "text_embeds": teacher_nega_pooled_prompt_embeds.to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype)},
+                                                return_dict=False,
+                                            )[0].detach().clone().to(torch.float32)
+                                            教师pred = 教师pred_uncond + args.teacher_cfg * (教师pred - 教师pred_uncond)
+                                        教师pred_x0 = (noisy_model_input小 - beta**0.5 * 教师pred) / alpha**0.5
                             else:
-                                noisy_model_input小 = alpha**0.5 * 教师pred_x0 + beta**0.5 * 教师pred
-                            with 计时(accelerator, global_step, 'unet_time'):
-                                add_time_ids = torch.cat(
-                                    [compute_time_ids(s, r, c) for s, r, c in zip(batch["original_sizes"], batch["resized_sizes"], batch["crop_top_lefts"])]
-                                ).to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype)
+                                x0小_std = x0小.std()
+                                x0_std = x0.std()
+                                sigmas小 = sigmas*x0小_std / (-sigmas*x0_std + sigmas*x0小_std + x0_std) * args.sigmas_scale
+                                估计方差 = (1.0 - sigmas小) ** 2 + sigmas小 ** 2
+                                k = 1 / 估计方差**0.5   # 保持信噪比不变，将方差缩放到1
 
-                                timesteps小 = min(range(0, 1000), key=lambda x: abs(alpha - sdxl_time_to_alpha[x]))
+                                初始beta = min(1, (sigmas小 * k) ** 2)
+                                教师pred_x0 = x0小
+                                for i in range(args.inference_steps):
+                                    beta = 初始beta * (1 - i / args.inference_steps)
+                                    alpha = 1 - beta
+                                    if i == 0:
+                                        noisy_model_input小 = alpha**0.5 * 教师pred_x0 + beta**0.5 * noise小
+                                    else:
+                                        noisy_model_input小 = alpha**0.5 * 教师pred_x0 + beta**0.5 * 教师pred
+                                    with 计时(accelerator, global_step, 'unet'):
+                                        add_time_ids = torch.cat(
+                                            [compute_time_ids(s, r, c) for s, r, c in zip(batch["original_sizes"], batch["resized_sizes"], batch["crop_top_lefts"])]
+                                        ).to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype)
 
-                                教师pred = 教师pipeline.unet(
-                                    noisy_model_input小.to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype),
-                                    timesteps小,
-                                    batch['sdxl_prompt_embeds'].to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype),
-                                    added_cond_kwargs={"time_ids": add_time_ids, "text_embeds": batch['sdxl_pooled_prompt_embeds'].to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype)},
-                                    return_dict=False,
-                                )[0].detach().clone().to(torch.float32)
+                                        timesteps小 = min(range(0, 1000), key=lambda x: abs(alpha - sdxl_time_to_alpha[x]))
 
-                                # 教师pred_x0 = (noisy_model_input小 / k - sigmas小 * 教师pred) / (1.0 - sigmas小)
-                                教师pred_x0 = (noisy_model_input小 - beta**0.5 * 教师pred) / alpha**0.5
+                                        教师pred = 教师pipeline.unet(
+                                            noisy_model_input小.to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype),
+                                            timesteps小,
+                                            batch['sdxl_prompt_embeds'].to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype),
+                                            added_cond_kwargs={"time_ids": add_time_ids, "text_embeds": batch['sdxl_pooled_prompt_embeds'].to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype)},
+                                            return_dict=False,
+                                        )[0].detach().clone().to(torch.float32)
 
-                        latents_to_decode = 教师pred_x0 / 教师pipeline.vae.config.scaling_factor
-                        image_pixels = 教师pipeline.vae.decode(latents_to_decode, return_dict=False)[0]
+                                        教师pred_x0 = (noisy_model_input小 - beta**0.5 * 教师pred) / alpha**0.5
 
-                        if args.quick_test:
-                            print('-'*10, f'对比', '-'*10)
-                            print(f'时间 {timesteps=} {timesteps小=}', )
-                            print(f'sigmas {sigmas=} {sigmas小=}')
-                            print('noisy_model_input小', noisy_model_input小.mean(), noisy_model_input小.var())
-                            print('教师pred', 教师pred.mean(), 教师pred.var())
-                            print('noise小', noise小.mean(), noise小.var())
-                            print('教师pred_x0', 教师pred_x0.mean(), 教师pred_x0.var())
-                            print('x0小', x0小.mean(), x0小.var())
-                            image = 教师pipeline.image_processor.postprocess(image_pixels, output_type='pil')[0]
-                            image.save(f'sd3/{int(timesteps)}_教师pred_x0_pixels.png')
-                            batch["原本images"][0].save(f'sd3/{int(timesteps)}_原本.png')
+                            latents_to_decode = 教师pred_x0 / 教师pipeline.vae.config.scaling_factor
+                            image_pixels = 教师pipeline.vae.decode(latents_to_decode, return_dict=False)[0]
 
-                        image_pixels = torch.clamp(image_pixels, min=-1.0, max=1.0)
-                        target_dist = vae.encode(image_pixels).latent_dist
-                        target_x0_sd3 = target_dist.mean
-                        target_x0_sd3 = (target_x0_sd3 - vae.config.shift_factor) * vae.config.scaling_factor
-                        target = target_x0_sd3.to(dtype=transformer.dtype)
-                        batch['timesteps'] = timesteps.to('cpu')
-                        batch['noisy_model_input'] = noisy_model_input.to('cpu')
-                        batch['target'] = target.to('cpu')
-                        batch['sigmas'] = sigmas
-                    for i in [vae, 教师pipeline.vae, 教师pipeline.unet]:
-                        i.to('cpu')
-                    clean()
+                            if args.quick_test:
+                                print('-'*10, f'对比', '-'*10)
+                                print(f'时间 {timesteps=} {timesteps小=}', )
+                                # print(f'sigmas {sigmas=} {sigmas小=}')
+                                print('noisy_model_input小', noisy_model_input小.mean(), noisy_model_input小.var())
+                                print('教师pred', 教师pred.mean(), 教师pred.var())
+                                print('noise小', noise小.mean(), noise小.var())
+                                print('教师pred_x0', 教师pred_x0.mean(), 教师pred_x0.var())
+                                print('x0小', x0小.mean(), x0小.var())
+                                image = 教师pipeline.image_processor.postprocess(image_pixels, output_type='pil')[0]
+                                image.save(f'sd3/{int(timesteps)}_教师pred_x0_pixels.png')
+
+                            image_pixels = torch.clamp(image_pixels, min=-1.0, max=1.0)
+                            target_dist = vae.encode(image_pixels).latent_dist
+                            target_x0_sd3 = target_dist.mean
+                            target_x0_sd3 = (target_x0_sd3 - vae.config.shift_factor) * vae.config.scaling_factor
+                            target = target_x0_sd3.to(dtype=transformer.dtype)
+                            if args.reflow:
+                                noisy_model_input = (1.0 - sigmas) * target + sigmas * noise
+                            else:
+                                noisy_model_input = (1.0 - sigmas) * x0 + sigmas * noise
+                            batch['timesteps'] = timesteps.to('cpu')
+                            batch['noisy_model_input'] = noisy_model_input.to('cpu')
+                            batch['target'] = target.to('cpu')
+                            batch['sigmas'] = sigmas
+                        for i in [vae, 教师pipeline.vae, 教师pipeline.unet]:
+                            i.to('cpu')
+                    with 计时(accelerator, global_step, 'clean'):
+                        clean()
                 transformer.to(accelerator.device)
             else:
                 yield from batch_buffer
@@ -1108,76 +1096,69 @@ def main(args):
 
     transformer.train()
     while global_step <= args.max_train_steps:
-        with 计时(accelerator, global_step, 'step_time'):
-            batch = next(train_dataloader_超)
+        batch = next(train_dataloader_超)
+        with 计时(accelerator, global_step, 'step'):
             models_to_accumulate = [transformer]
             with accelerator.accumulate(models_to_accumulate):
                 timesteps = batch['timesteps'].to(accelerator.device)
                 noisy_model_input = batch['noisy_model_input'].to(accelerator.device)
                 target = batch['target'].to(accelerator.device)
                 sigmas = batch['sigmas']
-                try:
-                    model_pred = transformer(
-                        hidden_states=noisy_model_input,
-                        timestep=timesteps,
-                        encoder_hidden_states=batch['prompt_embeds'].to(accelerator.device),
-                        pooled_projections=batch['pooled_prompt_embeds'].to(accelerator.device),
-                        return_dict=False,
-                    )[0]
-                except Exception:
-                    logging.exception(f'step{global_step}出问题了，{noisy_model_input.shape=}')
-                else:
-                    model_pred = model_pred * (-sigmas) + noisy_model_input
-                    if args.quick_test:
-                        with torch.no_grad():
-                            vae.to(accelerator.device)
-                            临时image_processor = VaeImageProcessor(vae_scale_factor=vae.config.scaling_factor)
-                            image = 临时image_processor.postprocess(vae.decode(model_pred.to(vae.dtype), return_dict=False)[0], output_type='pil')[0]
-                            image.save(f'sd3/{int(timesteps)}_学生pred_x0_pixels.png')
-                            vae.to('cpu')
+                model_pred = transformer(
+                    hidden_states=noisy_model_input,
+                    timestep=timesteps,
+                    encoder_hidden_states=batch['prompt_embeds'].to(accelerator.device),
+                    pooled_projections=batch['pooled_prompt_embeds'].to(accelerator.device),
+                    return_dict=False,
+                )[0]
+                model_pred = model_pred * (-sigmas) + noisy_model_input
+                if args.quick_test:
+                    with torch.no_grad():
+                        vae.to(accelerator.device)
+                        临时image_processor = VaeImageProcessor(vae_scale_factor=vae.config.scaling_factor)
+                        image = 临时image_processor.postprocess(vae.decode(model_pred.to(vae.dtype), return_dict=False)[0], output_type='pil')[0]
+                        image.save(f'sd3/{int(timesteps)}_学生pred_x0_pixels.png')
+                        vae.to('cpu')
 
-                    weighting = compute_loss_weighting_for_sd3(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
-                    loss = torch.mean(
-                        (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1),
-                        1,
-                    )
-                    loss = loss.mean()
-                    accelerator.backward(loss)
-                    if accelerator.sync_gradients:
-                        grad_norm = accelerator.clip_grad_norm_(transformer.parameters(), args.max_grad_norm)
+                weighting = compute_loss_weighting_for_sd3(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
+                loss = torch.mean(
+                    (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1),
+                    1,
+                )
+                loss = loss.mean()
+                accelerator.backward(loss)
+                if accelerator.sync_gradients:
+                    grad_norm = accelerator.clip_grad_norm_(transformer.parameters(), args.max_grad_norm)
 
-                    with 计时(accelerator, global_step, 'optimizer_step_time'):
-                        optimizer.step()
-                        lr_scheduler.step()
-                        optimizer.zero_grad()
-
-            if global_step % 40 == 20:
-                clean()
-                accelerator.log({"memory_allocated": torch.cuda.memory_allocated() / 1024**3, "memory_reserved": torch.cuda.memory_reserved() / 1024**3}, step=global_step)
+                with 计时(accelerator, global_step, 'optimizer'):
+                    optimizer.step()
+                    lr_scheduler.step()
+                    optimizer.zero_grad()
 
         if accelerator.is_main_process and (global_step % args.validation_steps == 0 or global_step in [args.validation_steps // 2]):
-            pipeline = StableDiffusion3Pipeline.from_pretrained(
-                args.pretrained_model_name_or_path,
-                vae=vae,
-                text_encoder=accelerator.unwrap_model(text_encoder_one),
-                text_encoder_2=accelerator.unwrap_model(text_encoder_two),
-                text_encoder_3=accelerator.unwrap_model(text_encoder_three),
-                transformer=accelerator.unwrap_model(transformer),
-                revision=args.revision,
-                variant=args.variant,
-                torch_dtype=weight_dtype,
-            )
-            clean()
-            pipeline.enable_model_cpu_offload()
-            log_validation(pipeline, accelerator, global_step, 5)
-            # log_validation(pipeline, accelerator, global_step, 2)
-            pipeline.remove_all_hooks()
-            transformer.to(accelerator.device)
-            vae.to(accelerator.device)
-            text_encoder_one.to('cpu')
-            text_encoder_two.to('cpu')
-            text_encoder_three.to('cpu')
-            clean()
+            with 计时(accelerator, global_step, 'validation'):
+                pipeline = StableDiffusion3Pipeline.from_pretrained(
+                    args.pretrained_model_name_or_path,
+                    vae=vae,
+                    text_encoder=accelerator.unwrap_model(text_encoder_one),
+                    text_encoder_2=accelerator.unwrap_model(text_encoder_two),
+                    text_encoder_3=accelerator.unwrap_model(text_encoder_three),
+                    transformer=accelerator.unwrap_model(transformer),
+                    revision=args.revision,
+                    variant=args.variant,
+                    torch_dtype=weight_dtype,
+                )
+                clean()
+                pipeline.enable_model_cpu_offload()
+                # log_validation(pipeline, accelerator, global_step, 3)
+                log_validation(pipeline, accelerator, global_step, 5)
+                pipeline.remove_all_hooks()
+                transformer.to(accelerator.device)
+                vae.to(accelerator.device)
+                text_encoder_one.to('cpu')
+                text_encoder_two.to('cpu')
+                text_encoder_three.to('cpu')
+                clean()
 
         logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], "grad_norm": grad_norm.item()}
         progress_bar.set_postfix(**logs)
@@ -1187,8 +1168,19 @@ def main(args):
             accelerator.log({"len_tag": batch['prompts'][0].count(','), "t": timesteps[0]}, step=global_step)
             global_step += 1
             if accelerator.is_main_process and global_step % args.checkpointing_steps == 0:
-                    save_path = os.path.join(checkpoint_dir, f"checkpoint-{global_step}")
-                    accelerator.save_state(save_path)
+                if args.checkpoints_total_limit is not None and os.path.exists(checkpoint_dir):
+                    checkpoints = [d for d in os.listdir(checkpoint_dir) if d.startswith("checkpoint")]
+                    checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+                    if len(checkpoints) >= args.checkpoints_total_limit:
+                        num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
+                        removing_checkpoints = checkpoints[0:num_to_remove]
+                        for removing_checkpoint in removing_checkpoints:
+                            removing_checkpoint = os.path.join(checkpoint_dir, removing_checkpoint)
+                            shutil.rmtree(removing_checkpoint)
+                save_path = os.path.join(checkpoint_dir, f"checkpoint-{global_step}")
+                accelerator.save_state(save_path)
+                # if global_step % (args.checkpointing_steps * 10) == 0:
+                #     exit()  # 临时用，防内存泄漏
 
         if global_step >= args.max_train_steps:
             break

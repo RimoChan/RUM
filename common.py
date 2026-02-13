@@ -1,11 +1,15 @@
 import gc
 import io
+import math
 import time
 import random
 import hashlib
 import contextlib
+from typing import Optional
 
 import torch
+from torch.optim.lr_scheduler import LambdaLR
+from torch.optim import Optimizer
 from tqdm import tqdm
 from PIL import Image
 from tensorboard.compat.proto import summary_pb2
@@ -15,7 +19,8 @@ from tensorboard.compat.proto import summary_pb2
 def 计时(accelerator, global_step, 名字):
     开始时间 = time.time()
     yield
-    accelerator.log({名字: time.time() - 开始时间}, step=global_step)
+    if accelerator.is_main_process:
+        accelerator.log({f'【计时】{名字}': time.time() - 开始时间}, step=global_step)
 
 
 def 哈(x) -> str:
@@ -28,10 +33,9 @@ def cycle(iterable_obj):
 
 
 def clean():
-    for _ in range(2):
-        torch.cuda.synchronize()
-        gc.collect()
-        torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 def clone_state_dict(d: dict) -> dict: 
@@ -95,8 +99,8 @@ def 生成optimizer(args_optimizer, unet, adam_beta1, adam_beta2, adam_weight_de
         optimizer = Prodigy(params_to_optimize, lr=1., weight_decay=0.01, slice_p=11, safeguard_warmup=True, use_bias_correction=True)
     elif args_optimizer == 'muon':
         from muon import SingleDeviceMuonWithAuxAdam
-        hidden_weights = [p for k, p in unet.named_parameters() if is_muon(k, p)]
-        hidden_gains_biases = [p for k, p in unet.named_parameters() if not is_muon(k, p)]
+        hidden_weights = [p for k, p in unet.named_parameters() if is_muon(k, p) and p.requires_grad]
+        hidden_gains_biases = [p for k, p in unet.named_parameters() if not is_muon(k, p) and p.requires_grad]
         param_groups = [
             dict(params=hidden_weights, use_muon=True, lr=learning_rate_muon, weight_decay=0.01),
             dict(params=hidden_gains_biases, use_muon=False, lr=learning_rate, betas=(adam_beta1, adam_beta2), weight_decay=adam_weight_decay),
@@ -149,6 +153,37 @@ def add_image_jpeg(writer, tag, img, global_step, quality=90):
         summary_pb2.Summary.Value(tag=tag, image=img_proto)
     ])
     writer.file_writer.add_summary(summary, global_step)
+
+
+def get_cosine_with_hard_restarts_schedule_with_warmup(
+    optimizer: Optimizer, num_warmup_steps: int, num_training_steps: int, num_cycles: int = 1, last_epoch: int = -1
+) -> LambdaLR:
+    def lr_lambda(current_step):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        if progress >= 1.0:
+            return 0.0
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * ((float(num_cycles) * progress) % 1.0)))) * 0.9 + 0.1
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch)
+
+
+def cosine_with_restart_scheduler改(
+    optimizer: Optimizer,
+    num_warmup_steps: Optional[int] = None,
+    num_training_steps: Optional[int] = None,
+    num_cycles: int = 1,
+    last_epoch: int = -1,
+) -> LambdaLR:
+    return get_cosine_with_hard_restarts_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=num_training_steps,
+        num_cycles=num_cycles,
+        last_epoch=last_epoch,
+    )
+
 
 
 validation_prompt = [

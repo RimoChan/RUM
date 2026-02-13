@@ -28,7 +28,11 @@ class dan后处理:
         人标签, 剩下的标签 = 分离人数标签(原始tags)
         random.shuffle(剩下的标签)
 
-        剩下的标签 = random.sample(剩下的标签, min(80, int(len(剩下的标签) * (1 - self.drop_tag_rate))))
+        保留标签数 = len(剩下的标签) * (1 - self.drop_tag_rate)
+        if 保留标签数 > 15:
+            保留标签数 = (15 * 2 + 保留标签数) / 3
+        剩下的标签 = random.sample(剩下的标签, min(30, int(保留标签数)))
+        random.shuffle(剩下的标签)
 
         角色标签 = d['tag_string_character'].split()
         for 角色 in 角色标签:
@@ -84,6 +88,6 @@ class dan后处理:
         examples["resized_sizes"] = resized_sizes
         examples["crop_top_lefts"] = crop_top_lefts
         examples["pixel_values"] = all_images
-        examples["原本images"] = images
+        del examples['image']
         examples = self.计算prompt(examples)
         return examples
