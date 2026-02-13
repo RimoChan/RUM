@@ -73,14 +73,14 @@
 1. reflow形式+替换CLIP。
 2. diffusion形式+替换CLIP。
 3. diffusion形式+不替换CLIP。
-4. 去除teacher<sub>(即使用原始的diffusion loss)</sub>
+4. 原版<sub>(也是这个训练代码，临时去除了teacher训的)</sub>
 
 ![img/分数.webp](img/分数.webp)
 
 
-右边那几个彩色的线其实是用diffusion形式训了几天，然后觉得不对又换成reflow形式导致的。 <sub>(所以你们能猜到实验1其实反而是最后补的)</sub>
+右边那几个彩色的线其实是用diffusion形式训了几天，然后觉得不对又换成reflow形式导致的。
 
-
+<sub>(所以你们能猜到实验1其实反而是最后补的)</sub>
 
 
 ## 看1看出图效果
@@ -125,7 +125,7 @@
 
 首先`pip install -r requirements.txt`装1下依赖，然后`go.sh`里面是启动命令，里面的参数基本上就是字面上的意思，大家有训过原版的应该都比较清楚，总之把数据集和模型的路径改1改就可以跑了。
 
-不过就不要再训什么SD3.5了，diffusers的仓库里其实有z-image和flux klein的训练代码，大家可以参考我的代码去试着适配1下！
+不过就不要再训什么SD3.5了，diffusers的仓库里其实有z-image和flux klein的训练代码，大家也可以参考我的代码去试着适配1下。
 
 ## 1些问题
 
