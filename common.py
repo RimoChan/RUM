@@ -54,7 +54,7 @@ def compute_time_ids(original_size, resized_size, crops_coords_top_left):
 
 
 def is_muon(name, param):
-    skip_keys = ["embed_tokens", "lm_head", "tok_embeddings", "output"]
+    skip_keys = ["embed_tokens", "lm_head", "tok_embeddings", "output", "embed", "modulation", "norm", "proj_out"]
     return param.ndim >= 2 and not any(key in name for key in skip_keys)
 
 
@@ -99,11 +99,13 @@ def 生成optimizer(args_optimizer, unet, adam_beta1, adam_beta2, adam_weight_de
         optimizer = Prodigy(params_to_optimize, lr=1., weight_decay=0.01, slice_p=11, safeguard_warmup=True, use_bias_correction=True)
     elif args_optimizer == 'muon':
         from muon import SingleDeviceMuonWithAuxAdam
-        hidden_weights = [p for k, p in unet.named_parameters() if is_muon(k, p) and p.requires_grad]
-        hidden_gains_biases = [p for k, p in unet.named_parameters() if not is_muon(k, p) and p.requires_grad]
+        hidden_weights = {k: p for k, p in unet.named_parameters() if is_muon(k, p) and p.requires_grad}
+        hidden_gains_biases = {k: p for k, p in unet.named_parameters() if not is_muon(k, p) and p.requires_grad}
+        print('使用muon层:', [*hidden_weights.keys()])
+        print('不用muon层:', [*hidden_gains_biases.keys()])
         param_groups = [
-            dict(params=hidden_weights, use_muon=True, lr=learning_rate_muon, weight_decay=0.01),
-            dict(params=hidden_gains_biases, use_muon=False, lr=learning_rate, betas=(adam_beta1, adam_beta2), weight_decay=adam_weight_decay),
+            dict(params=[*hidden_weights.values()], use_muon=True, lr=learning_rate_muon, weight_decay=0.01),
+            dict(params=[*hidden_gains_biases.values()], use_muon=False, lr=learning_rate, betas=(adam_beta1, adam_beta2), weight_decay=adam_weight_decay),
         ]
         optimizer = SingleDeviceMuonWithAuxAdam(param_groups)
     else:
@@ -111,7 +113,14 @@ def 生成optimizer(args_optimizer, unet, adam_beta1, adam_beta2, adam_weight_de
     return optimizer
 
 
-def 评测pipeline(pipe, n_iter, tags_seed=0, random_seed=0, guidance_scale_range=(6, 8)):
+def optimizer_to_device(optimizer, device):
+    for state in optimizer.state.values():
+        for k, v in state.items():
+            if isinstance(v, torch.Tensor):
+                state[k] = v.to(device)
+
+
+def 评测pipeline(pipe, n_iter, tags_seed=0, random_seed=0, guidance_scale=7):
     import benchmarker.ml_danbooru
     from benchmarker.common import 要测的标签, ml_danbooru标签2
     rd_tag = random.Random(tags_seed)
@@ -124,10 +133,9 @@ def 评测pipeline(pipe, n_iter, tags_seed=0, random_seed=0, guidance_scale_rang
         下划线标签组 = [i.strip().replace(' ', '_') for i in 标签组]
         images = pipe(
             prompt=f'1 girl, {", ".join(标签组)}',
-            negative_prompt = rd.choice(['worst quality, low quality', 'worst quality, low quality, blurry, greyscale, monochrome']),
             generator=torch.Generator(device='cuda').manual_seed(rd.randint(0, 2**16)),
             num_inference_steps=18+rd.randint(0, 6),
-            guidance_scale=random.randint(*guidance_scale_range),
+            guidance_scale=guidance_scale,
             width=704+rd.randint(0, 5)*64,
             height=704+rd.randint(0, 5)*64,
         ).images
@@ -156,7 +164,7 @@ def add_image_jpeg(writer, tag, img, global_step, quality=90):
 
 
 def get_cosine_with_hard_restarts_schedule_with_warmup(
-    optimizer: Optimizer, num_warmup_steps: int, num_training_steps: int, num_cycles: int = 1, last_epoch: int = -1
+    optimizer: Optimizer, num_warmup_steps: int, num_training_steps: int, num_cycles: int = 1, last_epoch: int = -1, cosine_min: float = 0.1,
 ) -> LambdaLR:
     def lr_lambda(current_step):
         if current_step < num_warmup_steps:
@@ -164,7 +172,7 @@ def get_cosine_with_hard_restarts_schedule_with_warmup(
         progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
         if progress >= 1.0:
             return 0.0
-        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * ((float(num_cycles) * progress) % 1.0)))) * 0.9 + 0.1
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * ((float(num_cycles) * progress) % 1.0)))) * (1-cosine_min) + cosine_min
 
     return LambdaLR(optimizer, lr_lambda, last_epoch)
 
@@ -175,6 +183,7 @@ def cosine_with_restart_scheduler改(
     num_training_steps: Optional[int] = None,
     num_cycles: int = 1,
     last_epoch: int = -1,
+    cosine_min: float = 0.1,
 ) -> LambdaLR:
     return get_cosine_with_hard_restarts_schedule_with_warmup(
         optimizer,
@@ -182,6 +191,7 @@ def cosine_with_restart_scheduler改(
         num_training_steps=num_training_steps,
         num_cycles=num_cycles,
         last_epoch=last_epoch,
+        cosine_min=cosine_min,
     )
 
 
@@ -193,6 +203,15 @@ validation_prompt = [
     ('1girl, momoi (blue archive), typing on keyboard, computer, sitting, angry, indoors, fuzichoco, newest', 4),
     ('1girl, yuuka (blue archive), holding cup, sitting, indoors, kantoku, newest', 5),
     ('1girl, azusa (blue archive), eating pizza, sitting, indoors, fuzichoco', 6),
+]
+
+validation_prompt_reform = [
+    ('1girl, character kisaki (blue archive), eating baozi, sitting, indoors, artist huwari (dnwls3010)', 1),
+    ('1girl, character black twintails, school uniform, outdoors, street, fullbody, black pantyhose, holding phone, looking at phone, > <, artist kani biimu', 2),
+    ('1girl, twintails, cat ears, maid, maid headdress, holding tray, white pantyhose, indoors, kitchen, artist momoko (momopoco), newest', 3),
+    ('1girl, character momoi (blue archive), typing on keyboard, computer, sitting, angry, indoors, artist fuzichoco, newest', 4),
+    ('1girl, character yuuka (blue archive), holding cup, sitting, indoors, artist kantoku, newest', 5),
+    ('1girl, character azusa (blue archive), eating pizza, sitting, indoors, artist fuzichoco', 6),
 ]
 
 

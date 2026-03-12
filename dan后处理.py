@@ -14,9 +14,10 @@ train_transforms = transforms.Compose(
 
 
 class dan后处理:
-    def __init__(self, drop_tag_rate: int, drop_char_feature_rate: int, size: tuple[int, int]):
+    def __init__(self, drop_tag_rate: float, drop_char_feature_rate: float, size: tuple[int, int], 学人rate: float):
         self.drop_tag_rate = drop_tag_rate
         self.drop_char_feature_rate = drop_char_feature_rate
+        self.学人rate = 学人rate
         self.size = size
 
     def 计算prompt(self, d: dict):
@@ -24,14 +25,19 @@ class dan后处理:
             assert len(v) == 1
             d[k] = v[0]
 
+        学人 = (random.random() < self.学人rate) and d['tag_string_character'].split()
+
         原始tags = d['tag_string_general'].split()
         人标签, 剩下的标签 = 分离人数标签(原始tags)
         random.shuffle(剩下的标签)
 
-        保留标签数 = len(剩下的标签) * (1 - self.drop_tag_rate)
-        if 保留标签数 > 15:
-            保留标签数 = (15 * 2 + 保留标签数) / 3
-        剩下的标签 = random.sample(剩下的标签, min(30, int(保留标签数)))
+        if 学人:
+            保留标签数 = min(random.randint(2, 5), len(剩下的标签))
+        else:
+            保留标签数 = len(剩下的标签) * (1 - self.drop_tag_rate)
+            if 保留标签数 > 15:
+                保留标签数 = (15 * 1 + 保留标签数) / 2
+        剩下的标签 = random.sample(剩下的标签, min(40, int(保留标签数)))
         random.shuffle(剩下的标签)
 
         角色标签 = d['tag_string_character'].split()
@@ -41,8 +47,6 @@ class dan后处理:
                     剩下的标签.remove(签)
 
         画师标签 = d['tag_string_artist']
-        if random.random() < 0.1:
-            画师标签 = 'artist:' + 画师标签
         画师标签 = [画师标签]
 
         时间标签 = 计算时间标签(d['created_at'])
@@ -55,10 +59,19 @@ class dan后处理:
             时间标签 = []
         if random.random() < 0.5:
             rating标签 = []
+
+        if 学人:
+            画师标签 = []
+            时间标签 = []
+            rating标签 = []
+
         新tags = 人标签 + 角色标签 + rating标签 + 剩下的标签 + 画师标签 + 时间标签
         新tags = [i for i in 新tags if i]
-
         d['prompts'] = ', '.join(新tags).replace('_', ' ')
+
+        新tags改 = 人标签 + [f'character {i}' for i in 角色标签] + [f'rating {i}' for i in rating标签] + 剩下的标签 + [f'artist {i}' for i in 画师标签] + 时间标签
+        新tags改 = [i for i in 新tags改 if i]
+        d['prompts改'] = ', '.join(新tags改).replace('_', ' ')
 
         return {k: [v] for k, v in d.items()}
 
