@@ -1,3 +1,4 @@
+import os
 import gc
 import io
 import math
@@ -98,7 +99,7 @@ def 生成optimizer(args_optimizer, unet, adam_beta1, adam_beta2, adam_weight_de
         params_to_optimize = unet.parameters()
         optimizer = Prodigy(params_to_optimize, lr=1., weight_decay=0.01, slice_p=11, safeguard_warmup=True, use_bias_correction=True)
     elif args_optimizer == 'muon':
-        from muon import SingleDeviceMuonWithAuxAdam
+        from muon import SingleDeviceMuonWithAuxAdam, MuonWithAuxAdam
         hidden_weights = {k: p for k, p in unet.named_parameters() if is_muon(k, p) and p.requires_grad}
         hidden_gains_biases = {k: p for k, p in unet.named_parameters() if not is_muon(k, p) and p.requires_grad}
         print('使用muon层:', [*hidden_weights.keys()])
@@ -107,7 +108,10 @@ def 生成optimizer(args_optimizer, unet, adam_beta1, adam_beta2, adam_weight_de
             dict(params=[*hidden_weights.values()], use_muon=True, lr=learning_rate_muon, weight_decay=0.01),
             dict(params=[*hidden_gains_biases.values()], use_muon=False, lr=learning_rate, betas=(adam_beta1, adam_beta2), weight_decay=adam_weight_decay),
         ]
-        optimizer = SingleDeviceMuonWithAuxAdam(param_groups)
+        if int(os.environ["WORLD_SIZE"]) == 1:
+            optimizer = SingleDeviceMuonWithAuxAdam(param_groups)
+        else:
+            optimizer = MuonWithAuxAdam(param_groups)
     else:
         raise ValueError(f'这是什么优化器？{args_optimizer}')
     return optimizer
@@ -194,6 +198,36 @@ def cosine_with_restart_scheduler改(
         cosine_min=cosine_min,
     )
 
+
+def 看看显存(device='cuda:0'):
+    tensor_count = 0
+    seen_storage_ptrs = set()
+    total_bytes = 0
+
+    device = torch.device(device)
+    a = []
+
+    for obj in gc.get_objects():
+        try:
+            if torch.is_tensor(obj):
+                if obj.is_cuda:
+                    if obj.device != device:
+                        continue
+                    tensor_count += 1
+                    storage = obj.untyped_storage()     # 获取底层存储的指针 (避免多个 view 共享内存被重复计算)
+                    storage_ptr = storage.data_ptr()
+                    if storage_ptr not in seen_storage_ptrs:
+                        seen_storage_ptrs.add(storage_ptr)
+                        total_bytes += storage.nbytes()
+                        a.append(obj)
+        except Exception:
+            pass
+
+    total_memory_mb = total_bytes / (1024 ** 2)
+    print(f'Tensor有 {tensor_count} 个，显存 {int(total_memory_mb)} MB。')
+    if total_memory_mb > 1000:
+        a.sort(key=lambda x: x.numel())
+        breakpoint()
 
 
 validation_prompt = [
