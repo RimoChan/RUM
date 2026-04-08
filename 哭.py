@@ -44,7 +44,6 @@ class 哭model(Flux2Transformer2DModel):
         eps: float = 1e-6,
         guidance_embeds: bool = True,
     ):
-        print(joint_attention_dim, guidance_embeds)
         super().__init__(
             patch_size=patch_size,
             in_channels=in_channels,

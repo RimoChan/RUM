@@ -76,7 +76,7 @@ def encode_prompt(prompt_batch, compel) -> tuple:
         return t
 
 
-def 生成optimizer(args_optimizer, unet, adam_beta1, adam_beta2, adam_weight_decay, adam_epsilon, learning_rate, learning_rate_muon):
+def 生成optimizer(args_optimizer, unet, adam_beta1, adam_beta2, adam_weight_decay, adam_epsilon, learning_rate, learning_rate_muon, embedder_2_k=1):
     import torch
     if 'adam' in args_optimizer:
         if args_optimizer == 'adam':
@@ -102,13 +102,18 @@ def 生成optimizer(args_optimizer, unet, adam_beta1, adam_beta2, adam_weight_de
         from muon import SingleDeviceMuonWithAuxAdam, MuonWithAuxAdam
         hidden_weights = {k: p for k, p in unet.named_parameters() if is_muon(k, p) and p.requires_grad}
         hidden_gains_biases = {k: p for k, p in unet.named_parameters() if not is_muon(k, p) and p.requires_grad}
-        print('使用muon层:', [*hidden_weights.keys()])
-        print('不用muon层:', [*hidden_gains_biases.keys()])
+        hidden_embedder_2 = {}
+        for k, v in [*hidden_gains_biases.items()]:
+            if 'context_embedder_2' in k:
+                hidden_embedder_2[k] = v
+                del hidden_gains_biases[k]
+        print(f'使用muon层: {len(hidden_weights)}个，不用muon层: {len(hidden_gains_biases)}个，大: {len(hidden_embedder_2)}个。')
         param_groups = [
             dict(params=[*hidden_weights.values()], use_muon=True, lr=learning_rate_muon, weight_decay=0.01),
             dict(params=[*hidden_gains_biases.values()], use_muon=False, lr=learning_rate, betas=(adam_beta1, adam_beta2), weight_decay=adam_weight_decay),
+            dict(params=[*hidden_embedder_2.values()], use_muon=False, lr=learning_rate*embedder_2_k, betas=(adam_beta1, adam_beta2), weight_decay=adam_weight_decay),
         ]
-        if int(os.environ["WORLD_SIZE"]) == 1:
+        if int(os.environ.get("WORLD_SIZE", 1)) == 1:
             optimizer = SingleDeviceMuonWithAuxAdam(param_groups)
         else:
             optimizer = MuonWithAuxAdam(param_groups)

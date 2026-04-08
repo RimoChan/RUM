@@ -1,13 +1,14 @@
 numpy==1.26.4
-diffusers==0.35.2
-transformers==4.49.0
+diffusers==0.37.1
+# 这2个和compel冲突了，手动装1下吧
+# transformers==5.1.0
+# huggingface-hub==1.4.1
 tqdm==4.67.1
 datasets==3.3.2
 fire==0.7.1
-peft==0.17.1
+peft==0.18.1
 onnxruntime-gpu==1.22.0
 protobuf==3.20.3
-huggingface-hub==0.35.3
 pillow==10.4.0
 orjson==3.11.3
 rimo-storage==1.4.0
@@ -15,5 +16,5 @@ rimo-utils==1.7.0
 compel==2.0.3
 sentencepiece==0.2.1
 tensorboard==2.20.0
-git+https://github.com/RimoChan/waifu-sensor.git
+git+https://github.com/RimoChan/waifu-sensor
 git+https://github.com/KellerJordan/Muon
