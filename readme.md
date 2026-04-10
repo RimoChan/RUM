@@ -91,11 +91,11 @@
 
 我把权重放在了huggingface的[RUM-FLUX.2-klein-4B-preview](https://huggingface.co/rimochan/RUM-FLUX.2-klein-4B-preview/tree/main)，大家可以下载回来试1试。
 
-下面是训练到608k step的效果。能看出模型的prompt遵循还是很好的，但是细节有问题，基本上手和脚没有1张是不崩溃的，角色也画得不是很像。
+下面是训练到608k step的效果。能看出模型的prompt遵循还是很好的，但是细节有问题，基本上手指没有1张是不崩溃的，角色也画得不是很像。
 
 不过好在现在训练成本才只要$145，然后指标也还在涨，我反正就放着继续训，可能下个月它就如臻化境了！
 
-<img src='img\flux.webp' width='1000px'>
+<img src='img/flux_608000.webp' width='1000px'>
 
 样例的prompt分别是:
 
