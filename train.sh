@@ -1,0 +1,4 @@
+export PYTORCH_CUDA_ALLOC_CONF=backend:cudaMallocAsync,expandable_segments:True
+export PYTORCH_ALLOC_CONF=backend:cudaMallocAsync,expandable_segments:True
+
+accelerate launch train_flux_klein哭.py --pretrained_model_name_or_path="black-forest-labs/FLUX.2-klein-base-4B" --teacher_model_name_or_path="/workspace/lora切/wai_v140_A4_21000.safetensors" --train_data_dir="/workspace/lora切/image_balance_2024_webp" --output_dir="fk" --train_batch_size=1 --num_train_epochs=20 --lr_num_cycles=6 --checkpointing_steps=4000 --validation_steps=4000 --lr_warmup_steps=200 --gradient_checkpointing --mixed_precision="bf16" --learning_rate=1.2e-5 --lr_cosine_min=0.8 --lr_scheduler=cosine_with_restarts --drop_tag_rate=0.1 --drop_text_rate=0.1 --drop_char_feature_rate=0.6 --optimizer=muon --inference_steps=4 --dataloader_num_workers=1 --teacher_cfg=1.5 --logit_mean=-1.9 --logit_std=1.3 --learning_rate_muon=40 --学人rate=0.5 --embedder_2_k=1

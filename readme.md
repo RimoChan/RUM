@@ -25,7 +25,9 @@
 
 那有没有办法在训练时直接得到真正的V呢？诶，其实有，我们前面提到了，我们已经有很好的SDXL的动漫模型，这不就有V嘛！
 
-好耶，这么简单就解决了！不过倒也没有，接下来我们来以训练SD3.5为例，来具体说1下是要怎样做吧。
+好耶，这么简单就解决了！不过倒也没有，接下来我来具体说1下是要怎样做吧。
+
+我训练了SD3.5和Flux2-klein，为了方便就以SD3.5为例来说——
 
 首先第1个问题是，SD3.5和SDXL的Latent空间不1样，直接把V移植过去没有意义，而且形状也不对。这个的解决方法是这样，我们把Latent空间分成3个部分，t=0时样本端是对应自然图像的，t=1000时是噪声端，什么也不对应，还有剩下中间的部分。
 
@@ -56,19 +58,21 @@
 
 ## 训练过程
 
-在RTX5090上，每天可以训34000个step。训练2~4周时间，就可以得到1个看起来效果还不错的模型了。
+在RTX5090上，每天可以训34000个step<sub>(对于Flux2-klein-4B是21000个)</sub>。训练1个月就可以得到1个还算能用的模型了。
 
-5090单卡的租赁价格大概是每天$5，这样训练1个月成本才1g黄金<sub>(恢复金本位制，耶！)</sub>，原本继续预训练1个动漫模型，典型的花费大概是$10000，这样1下就省了99%的钱啦！当然这个对比其实不公平，正规的$10000的模型其实效果要比我这个好很多。
+5090单卡的租赁价格大概是每天$5，这样1个月成本才1g黄金<sub>(恢复金本位制，耶！)</sub>，原本继续预训练1个动漫模型，典型的花费大概是$10000，这样1下就省了99%的钱啦！当然这个对比其实不公平，正规的$10000的模型其实效果要比我这个好很多。
 
 然后是显存问题，大家可能会担心，说加载这么多模型，5090居然放得下吗。确实是放不下的，所以实际上这些模型是半在线的，代码是这样预计算的: 每轮先加载50个样本，然后用TE/VAE/SDXL把我们前面说的Xt2、X02什么的全部都算出来，然后把这些模型放回RAM，最后再训练50个step的DiT。这样的话bf16混合精度峰值VRAM大约是31G，纯bf16的话可能24G的4090也能训。
 
-训练的两个模型分别是[stable-diffusion-3.5-medium](https://huggingface.co/stabilityai/stable-diffusion-3.5-medium)和[WAI-illustrious-SDXL](https://civitai.com/models/827184)，训练数据是danbooru2024抽了1个很小的子集，总共就47k数据。
+训练用的教师模型是[WAI-illustrious-SDXL](https://civitai.com/models/827184)，训练数据是danbooru2024简单抽了1个很小的子集，总共就47k数据。
 
-这里我为了让它快1点，提前训了1个SDXL的步数蒸馏模型把原版SDXL替换掉<sub>(我用的是[这个](https://github.com/G-U-N/Rectified-Diffusion)</sub>，实际上每个训练step也都只推理2-4个step，不会慢太多。当然，用原始的50个step的版本也可以训练，不过很慢所以还是建议先做1遍步数蒸馏，通常只要1-2天即可。
+学生模型可以是[stable-diffusion-3.5-medium](https://huggingface.co/stabilityai/stable-diffusion-3.5-medium)或者[FLUX.2-klein-base-4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-4B)，Flux2-klein的9B版本也验证过能跑，不过比较贵我就没有训。
+
+此外，我为了让它快1点，提前训了1个SDXL的步数蒸馏模型把原版SDXL替换掉<sub>(我用的是[这个](https://github.com/G-U-N/Rectified-Diffusion)</sub>，实际上每个训练step也都只推理2-4个step，不会慢太多。当然，用原始的50个step的版本也可以训练，不过很慢所以还是建议先做1遍步数蒸馏，通常只要1-2天即可。
 
 因为微调动漫模型的人1般不公开数据集，所以没有办法测FID。模型评估用的是ML-Danbooru，它是1个标签模型，评估方法是先用标签构造1组prompt，让SD3.5生成之后再检测图像中有没有对应的标签，最终的分数就是`命中的标签 / 所有的标签`。
 
-下面是不同参数下的得分对step的曲线，从上到下4条线代表的4个实验分别是: 
+下面是SD3.5在不同参数下的得分对step的曲线，从上到下4条线代表的4个实验分别是: 
 
 1. reflow形式+替换CLIP。
 2. diffusion形式+替换CLIP。
@@ -83,49 +87,36 @@
 <sub>(所以你们能猜到实验1其实反而是最后补的)</sub>
 
 
-## 看1看出图效果
+## 权重和效果
 
-总体来说，模型的prompt遵循还是很好的，但是细节有问题，基本上手和脚没有1张是不崩溃的，所以训完之后还要再做微调才能发布给最终用户用。
+我把权重放在了huggingface的[RUM-FLUX.2-klein-4B-preview](https://huggingface.co/rimochan/RUM-FLUX.2-klein-4B-preview/tree/main)，大家可以下载回来试1试。
 
-来看几个case:
+下面是训练到608k step的效果。能看出模型的prompt遵循还是很好的，但是细节有问题，基本上手和脚没有1张是不崩溃的，角色也画得不是很像。
 
+不过好在现在训练成本才只要$145，然后指标也还在涨，我反正就放着继续训，可能下个月它就如臻化境了！
 
----
+<img src='img\flux.webp' width='1000px'>
 
-<img src='img/1.webp' width='400px'>
+样例的prompt分别是:
 
-- 可爱的小桃！
-- prompt是`1girl, momoi \(blue archive\), typing on computer keyboard, sitting,  angry, animal ear headphones, white jacket, necktie, shirt, indoors,table, momoko \(momopoco\), newest`
-- 手指完全崩溃了，光环的形状也不对，还有这个电脑放在左边是要看什么！
-- `typing on computer keyboard` 这个短语其实不在danbooru tags里，OOD的能力应该是从SD3.5m那里继承过来的。
-- 这里有画师名，训练的时候其实是带画师名的，不过看来它在这方面的学习并不是很好。
+- `1girl, kisaki (blue archive), eating baozi, sitting, indoors`
+- `1girl, momoi (blue archive), typing on keyboard, computer, animal ear headphones, sitting, angry, indoors, newest`
+- `1girl, yuuka (blue archive), holding cup, sitting, indoors, kantoku, newest`
+- `1girl, hoshino (blue archive), eating pizza, sitting, indoors`
 
----
+不过坏消息是我加了1路CLIP之后，ComfyUI跑不了了，有没有人来帮我适配1下ComfyUI呀？现在只能用diffusers跑了，推理代码就是根目录下的`推理.py`，模型路径和prompt都硬编码在文件里，改1下常量然后用python跑就可以了。
 
-<img src='img/2.webp' width='400px'>
+对了，这个是Flux2-klein，上面的指标曲线是SD3.5，大家不要看错了以为我没放后面的step。
 
-- 可爱的邮箱！
-- prompt是`1girl, yuuka \(blue archive\), fullbody, table, white jacket, black skirt, holding cup, sitting, indoors, cafe, plant, newest`
-- 这张手稍微好点不过也没有好太多，还有桌子上那是什么东西！
-
----
-
-<img src='img/3.webp' width='400px'>
-
-- 可爱的灵梦！
-- prompt是`1girl, hakurei reimu, outdoors, mountain, torii, smile, waving, momoko \(momopoco\), newest`
-- 算了我不继续吐槽自己了你们用眼睛看吧！
-
-此外，颜色偏淡是教师模型的问题，教师模型虽然是蒸馏时是带CFG的，但是合理的CFG仍然在1.5左右，我为了让它跑得快1点把CFG设成1了。
+然后SD3.5那个反正已经落伍了，应该也没有人会想去用，我就不放权重了，对它的效果有兴趣的话可以到`img`文件夹里面自己看。
 
 
 ## 如何启动训练
 
 首先你要有Python和torch。我的版本是Python3.10和torch 2.9.1+cu130，这个代码应该不挑版本，你自己的能跑就行。
 
-首先`pip install -r requirements.txt`装1下依赖，然后`go.sh`里面是启动命令，里面的参数基本上就是字面上的意思，大家有训过原版的应该都比较清楚，总之把数据集和模型的路径改1改就可以跑了。
+首先`pip install -r requirements.txt`装1下依赖，然后`train.sh`里面是启动命令，里面的参数基本上就是字面上的意思，大家有训过原版的应该都比较清楚，总之把数据集和模型的路径改1改就可以跑了。
 
-不过就不要再训什么SD3.5了，diffusers的仓库里其实有z-image和flux klein的训练代码，大家也可以参考我的代码去试着适配1下。
 
 ## 1些问题
 
@@ -138,15 +129,10 @@
 
 从之前的消融的结果来看，可以看出在加速上蒸馏的贡献还是占主导的，至少前面那些没有在白说啦。CLIP能变快，那反正就加上，省点训练成本总比没有好。
 
-然后没有CLIP怎么办，嗯，可以试试自己用手加1路，或者就不要CLIP硬训也行。
+然后模型没有CLIP怎么办，可以试试自己用手加1路。或者就不要CLIP硬训也行，但是在Flux上的实验有发现，带上CLIP的话，对角色的学习会快很多。
 
 
-3. 为什么要用SD3.5-medium，这个基础模型的效果不是很好吧？
-
-确实。但是考虑到要让1般用户的机器可以跑，本身又比较有名的模型<sub>(要不然我去解释很麻烦)</sub>，就只剩下SD3.5-medium能选了……
-
-
-4. 为什么用diffusion形式计算V时，不能只走1步？这样就会比reflow形式快吧。
+3. 为什么用diffusion形式计算V时，不能只走1步？这样就会比reflow形式快吧。
 
 SDXL实际预测的是epsilon，尽管公式上等价于X，但是这样算出的X并不会完全干净，等下要过2次VAE的时候没法处理残留的噪声成分，会产生1些横竖交错的伪影。所以只好换成正规的扩散推理过程，让模型走全程。
 
