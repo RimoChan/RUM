@@ -18,18 +18,16 @@ import transformers
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration, set_seed
-from huggingface_hub import create_repo
 from tqdm.auto import tqdm
-from transformers import CLIPTextModelWithProjection, CLIPTokenizer, PretrainedConfig, Qwen2TokenizerFast, Qwen3ForCausalLM
+from transformers import Qwen2TokenizerFast, Qwen3ForCausalLM
 
 import diffusers
-from diffusers.pipelines.flux2.image_processor import Flux2ImageProcessor
-from diffusers import FlowMatchEulerDiscreteScheduler,  StableDiffusionXLPipeline, Flux2KleinPipeline, Flux2Transformer2DModel, AutoencoderKLFlux2
+from diffusers import FlowMatchEulerDiscreteScheduler,  StableDiffusionXLPipeline, Flux2KleinPipeline, AutoencoderKLFlux2
 from diffusers.training_utils import compute_density_for_timestep_sampling, compute_loss_weighting_for_sd3
 from compel import Compel, ReturnedEmbeddingsType
 
 from dan后处理 import dan后处理
-from common import 计时, 哈, cycle, clean, sdxl_time_to_alpha, 生成optimizer, 评测pipeline, add_image_jpeg, validation_prompt, validation_prompt_reform, cosine_with_restart_scheduler改, optimizer_to_device
+from common import 计时, 哈, cycle, clean, sdxl_time_to_alpha, 生成optimizer, 评测pipeline, 评测pipeline人, add_image_jpeg, validation_prompt, validation_prompt_reform, cosine_with_restart_scheduler改, optimizer_to_device
 from common import encode_prompt as encode_prompt_sdxl
 
 from 哭 import 哭model
@@ -74,8 +72,13 @@ def log_validation(
         clean()
         if global_step > 0:
             pipeline.set_progress_bar_config(disable=True)
-            分数 = 评测pipeline(pipeline, n_iter=args.validation_n_iter, guidance_scale=guidance_scale)
-            accelerator.log({f"分数-cfg{guidance_scale}": 分数}, step=global_step)
+            if args.validation_type == 'human':
+                分数 = 评测pipeline人(pipeline, n_iter=args.validation_n_iter, guidance_scale=guidance_scale)
+                前缀 = '人分数'
+            else:
+                分数 = 评测pipeline(pipeline, n_iter=args.validation_n_iter, guidance_scale=guidance_scale)
+                前缀 = '分数'
+            accelerator.log({f"{前缀}-cfg{guidance_scale}": 分数}, step=global_step)
     for tracker in accelerator.trackers:
         if tracker.name == "tensorboard":
             concat_image = np.concatenate([np.asarray(img) for img in images], axis=1)
@@ -86,7 +89,7 @@ def log_validation(
 
 
 def 生成dataset(accelerator, drop_tag_rate, drop_char_feature_rate, 学人rate) -> tuple:
-    d后 = dan后处理(drop_tag_rate, drop_char_feature_rate, (576, 1344), 学人rate=学人rate)
+    d后 = dan后处理(drop_tag_rate, drop_char_feature_rate, (args.min_size, args.max_size), 学人rate=学人rate)
     dataset = load_dataset(
         "imagefolder",
         data_files={"train": os.path.join(args.train_data_dir, "**")},
@@ -147,6 +150,11 @@ def parse_args(input_args=None):
         "--validation_n_iter",
         type=int,
         default=50,
+    )
+    parser.add_argument(
+        "--validation_type",
+        type=str,
+        default='human',
     )
     parser.add_argument(
         "--prefetch_steps",
@@ -285,7 +293,8 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam and Prodigy optimizers."
     )
-    parser.add_argument("--adam_weight_decay", type=float, default=1e-04, help="Weight decay to use for unet params")
+    parser.add_argument("--adam_weight_decay", type=float, default=1e-04)
+    parser.add_argument("--muon_weight_decay", type=float, default=1e-02)
     parser.add_argument(
         "--adam_weight_decay_text_encoder", type=float, default=1e-03, help="Weight decay to use for text_encoder"
     )
@@ -389,6 +398,21 @@ def parse_args(input_args=None):
         "--学人rate",
         type=float,
         default=0,
+    )
+    parser.add_argument(
+        "--min_size",
+        type=int,
+        default=576,
+    )
+    parser.add_argument(
+        "--max_size",
+        type=int,
+        default=1344,
+    )
+    parser.add_argument(
+        "--embedder_2_k",
+        type=int,
+        default=1,
     )
 
     if input_args is not None:
@@ -519,11 +543,6 @@ def main(args):
         if hasattr(transformer.context_embedder_2, 'bias') and transformer.context_embedder_2.bias is not None:
             torch.nn.init.zeros_(transformer.context_embedder_2.bias)
 
-    if args.resume_transformer:
-        from safetensors.torch import load_file
-        state_dict = load_file(args.resume_transformer)
-        transformer.load_state_dict(state_dict)
-
     transformer.requires_grad_(True)
     vae.requires_grad_(False)
 
@@ -562,7 +581,7 @@ def main(args):
         lr_muon = args.learning_rate * args.learning_rate_muon
     else:
         lr_muon = args.learning_rate_muon
-    optimizer = 生成optimizer(args.optimizer, transformer, args.adam_beta1, args.adam_beta2, args.adam_weight_decay, args.adam_epsilon, args.learning_rate, lr_muon)
+    optimizer = 生成optimizer(args.optimizer, transformer, args.adam_beta1, args.adam_beta2, args.adam_weight_decay, args.adam_epsilon, args.learning_rate, lr_muon, embedder_2_k=args.embedder_2_k, muon_weight_decay=args.muon_weight_decay)
     train_dataset = 生成dataset(accelerator, args.drop_tag_rate, args.drop_char_feature_rate, args.学人rate)
 
     train_dataloader = torch.utils.data.DataLoader(
@@ -622,7 +641,12 @@ def main(args):
         特征 += f'-学人{args.学人rate}'
     if args.learning_rate_muon:
         特征 += f'-Muon{args.learning_rate_muon}'
+    if args.muon_weight_decay != 1e-2:
+        特征 += f'-D{args.muon_weight_decay}'
     特征 += f'-哭'
+    if args.embedder_2_k != 1:
+        特征 += f'{args.embedder_2_k}'
+
     if accelerator.is_main_process:
         args_cp = vars(args).copy()
         args_cp["text_encoder_out_layers"] = str(args_cp["text_encoder_out_layers"])
@@ -640,7 +664,6 @@ def main(args):
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
-    global_step = 0
 
     if args.resume_from_checkpoint == 'latest':
         if 候选checkpoint := [*Path(checkpoint_dir).glob('checkpoint-*')]:
@@ -668,7 +691,13 @@ def main(args):
             )
             lr_scheduler = accelerator.prepare(lr_scheduler)
     else:
-        initial_global_step = 0
+        if args.resume_transformer:
+            from safetensors.torch import load_file
+            state_dict = load_file(args.resume_transformer)
+            transformer.load_state_dict(state_dict)
+            global_step = initial_global_step = 0
+        else:
+            global_step = initial_global_step = 0
 
     progress_bar = tqdm(
         range(0, args.max_train_steps),
@@ -887,6 +916,8 @@ def main(args):
                 with 计时(accelerator, global_step, 'optimizer'):
                     if args.offload_optimizer and accelerator.sync_gradients:
                         optimizer_to_device(optimizer, accelerator.device)
+                    if global_step % 5 == 0:
+                        torch.cuda.empty_cache()
                     optimizer.step()
                     lr_scheduler.step()
                     optimizer.zero_grad()

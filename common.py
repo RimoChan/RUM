@@ -1,6 +1,7 @@
 import os
 import gc
 import io
+import json
 import math
 import time
 import random
@@ -76,7 +77,7 @@ def encode_prompt(prompt_batch, compel) -> tuple:
         return t
 
 
-def 生成optimizer(args_optimizer, unet, adam_beta1, adam_beta2, adam_weight_decay, adam_epsilon, learning_rate, learning_rate_muon, embedder_2_k=1):
+def 生成optimizer(args_optimizer, unet, adam_beta1, adam_beta2, adam_weight_decay, adam_epsilon, learning_rate, learning_rate_muon, embedder_2_k=1, muon_weight_decay=0.01):
     import torch
     if 'adam' in args_optimizer:
         if args_optimizer == 'adam':
@@ -97,7 +98,7 @@ def 生成optimizer(args_optimizer, unet, adam_beta1, adam_beta2, adam_weight_de
     elif args_optimizer == 'prodigy':
         from prodigyopt import Prodigy
         params_to_optimize = unet.parameters()
-        optimizer = Prodigy(params_to_optimize, lr=1., weight_decay=0.01, slice_p=11, safeguard_warmup=True, use_bias_correction=True)
+        optimizer = Prodigy(params_to_optimize, lr=1., weight_decay=muon_weight_decay, slice_p=11, safeguard_warmup=True, use_bias_correction=True)
     elif args_optimizer == 'muon':
         from muon import SingleDeviceMuonWithAuxAdam, MuonWithAuxAdam
         hidden_weights = {k: p for k, p in unet.named_parameters() if is_muon(k, p) and p.requires_grad}
@@ -127,6 +128,36 @@ def optimizer_to_device(optimizer, device):
         for k, v in state.items():
             if isinstance(v, torch.Tensor):
                 state[k] = v.to(device)
+
+
+def 评测pipeline人(pipe, n_iter, guidance_scale=7):
+    from imgutils.tagging import get_wd14_tags
+    人频率1 = {k: v for k, v in json.loads(open('./人频率6000000~7000000.json').read()).items() if v > 24*1.3}
+    人频率2 = {k: v for k, v in json.loads(open('./人频率1~6400000.json').read()).items() if v > 64*1.5}
+    要测的人 = sorted(set(人频率1) | set(人频率2))
+    记录 = []
+    for index, 人 in enumerate(tqdm(要测的人[:n_iter], ncols=70, desc='评测人')):
+        人 = 人.strip().replace('_', ' ')
+        seed = index*100
+        image = pipe(
+            prompt=f'1 girl, {人}',
+            generator=torch.Generator(device='cpu').manual_seed(seed),
+            num_inference_steps=20,
+            guidance_scale=guidance_scale,
+            width=640,
+            height=768,
+        ).images[0]
+        预测 = get_wd14_tags(image, character_threshold=0.3)[2]
+        记录.append({
+            '预测': 预测,
+            '人': 人,
+            'seed': seed,
+        })
+    好 = 0
+    for d in 记录:
+        t = d['人'].replace(' ', '_')
+        好 += d['预测'].get(t, 0)
+    return 好 / len(记录)
 
 
 def 评测pipeline(pipe, n_iter, tags_seed=0, random_seed=0, guidance_scale=7):
