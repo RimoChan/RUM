@@ -24,6 +24,7 @@ from transformers import Qwen2TokenizerFast, Qwen3ForCausalLM
 import diffusers
 from diffusers import FlowMatchEulerDiscreteScheduler,  StableDiffusionXLPipeline, Flux2KleinPipeline, AutoencoderKLFlux2
 from diffusers.training_utils import compute_density_for_timestep_sampling, compute_loss_weighting_for_sd3
+from diffusers import DPMSolverMultistepScheduler
 from compel import Compel, ReturnedEmbeddingsType
 
 from dan后处理 import dan后处理
@@ -162,16 +163,18 @@ def parse_args(input_args=None):
         default=50,
     )
     parser.add_argument(
+        "--prefetch_n_sample",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
         "--output_dir",
         type=str,
         default="flux_klein",
     )
     parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
     parser.add_argument(
-        "--train_batch_size", type=int, default=4, help="Batch size (per device) for the training dataloader."
-    )
-    parser.add_argument(
-        "--sample_batch_size", type=int, default=4, help="Batch size (per device) for sampling images."
+        "--train_batch_size", type=int, default=1, help="Batch size (per device) for the training dataloader."
     )
     parser.add_argument("--num_train_epochs", type=int, default=1)
     parser.add_argument(
@@ -461,7 +464,7 @@ def main(args):
     if args.quick_test:
         validation_prompt = validation_prompt[:1]
         args.validation_steps = 6
-        args.prefetch_steps = 3
+        args.prefetch_steps = 5
         args.seed = 1
         args.validation_n_iter = 2
 
@@ -563,6 +566,8 @@ def main(args):
     教师pipeline.text_encoder.requires_grad_(False)
     教师pipeline.text_encoder_2.requires_grad_(False)
 
+    scheduler = DPMSolverMultistepScheduler.from_config(教师pipeline.scheduler.config)
+
     for k in ['vae', 'transformer', 'text_encoder', '教师pipeline.unet', '教师pipeline.vae', '教师pipeline.text_encoder', '教师pipeline.text_encoder_2']:
         v = eval(k)
         print(f'{k}({type(v).__name__})参数量: {v.num_parameters(only_trainable=False) / 1e9:.2f} B')
@@ -633,6 +638,8 @@ def main(args):
         f'x{args.gradient_accumulation_steps}' * (args.gradient_accumulation_steps > 1) + \
         f'x{world_size}' * (world_size > 1) + \
         f'-{args.lr_num_cycles}-drop{args.drop_text_rate}&{args.drop_tag_rate}&{args.drop_char_feature_rate}-{args.mixed_precision}-SS{args.sigmas_scale}-n{args.inference_steps}-cfg{args.teacher_cfg}-{args.weighting_scheme}_{args.logit_mean}_{args.logit_std}' + '-TEST'*bool(args.quick_test)
+    if args.prefetch_n_sample != 1:
+        特征 += f'-sp{args.prefetch_n_sample}'
     if args.max_grad_norm != 1:
         特征 += f'-norm{args.max_grad_norm}'
     if args.reform_prompt:
@@ -717,6 +724,38 @@ def main(args):
             sigma = sigma.unsqueeze(-1)
         return sigma
 
+    def batch_n_sample(batch: dict) -> list[dict]:
+        a = []
+        标记 = random.randint(1000, 9999)
+        for _ in range(args.prefetch_n_sample):
+            b = copy.deepcopy(batch)
+            u = compute_density_for_timestep_sampling(
+                weighting_scheme=args.weighting_scheme,
+                batch_size=b['noise'].shape[0],
+                logit_mean=args.logit_mean,
+                logit_std=args.logit_std,
+                mode_scale=args.mode_scale,
+            )
+            indices = (u * noise_scheduler_copy.config.num_train_timesteps).long()
+            timesteps = noise_scheduler_copy.timesteps[indices].to(device=b['noise'].device)
+            sigmas = get_sigmas(timesteps, n_dim=b['noise'].ndim, dtype=b['noise'].dtype).to(b['noise'].device)
+            noisy_model_input = (1.0 - sigmas) * b['target_x0_sd3'] + sigmas * b['noise']
+            b['timesteps'] = timesteps
+            b['sigmas'] = sigmas
+            b['noisy_model_input'] = Flux2KleinPipeline._patchify_latents(noisy_model_input)
+            b['target_v'] = Flux2KleinPipeline._patchify_latents(b['noise'] - b['target_x0_sd3'])
+            if not args.quick_test:
+                del b['target_x0_sd3'], b['noise']
+            b_cpu = {}
+            for k, v in b.items():
+                if isinstance(b, torch.Tensor):
+                    b_cpu[k] = v.cpu()
+                else:
+                    b_cpu[k] = v
+            b_cpu['标记'] = 标记
+            a.append(b_cpu)
+        return a
+
     def flux_vae_encode(vae, pixel_values) -> torch.Tensor:
         latent = vae.encode(pixel_values.to(vae.dtype)).latent_dist.mode()
         latent = Flux2KleinPipeline._patchify_latents(latent)
@@ -727,8 +766,10 @@ def main(args):
     def 超源(it, accelerator):
         batch_buffer = []
         teacher_nega_prompt_embeds, teacher_nega_pooled_prompt_embeds = [i.cpu() for i in encode_prompt_sdxl([''], 教师pipeline的compel)]
+        prefetch进度条 = tqdm(desc='prefetch', total=args.prefetch_steps)
         while True:
             if not batch_buffer:
+                prefetch进度条.reset()
                 transformer.to('cpu')
                 with torch.no_grad():
                     with 计时(accelerator, global_step, 'dataloader'):
@@ -768,60 +809,46 @@ def main(args):
                         for i in [vae, 教师pipeline.vae, 教师pipeline.unet]:
                             i.to(accelerator.device)
                         for batch in batch_buffer:
+                            prefetch进度条.update(1)
                             pixel_values = batch["pixel_values"]
                             bsz = pixel_values.shape[0]
                             assert bsz == 1
                             noise = torch.randn(size=(bsz, 32, pixel_values.shape[-2]//8, pixel_values.shape[-1]//8), dtype=torch.float32, device=vae.device)
                             noise小 = noise.unflatten(1, (4, 8)).mean(dim=2) * (8**0.5)
 
-                            u = compute_density_for_timestep_sampling(
-                                weighting_scheme=args.weighting_scheme,
-                                batch_size=bsz,
-                                logit_mean=args.logit_mean,
-                                logit_std=args.logit_std,
-                                mode_scale=args.mode_scale,
-                            )
-                            indices = (u * noise_scheduler_copy.config.num_train_timesteps).long()
-                            timesteps = noise_scheduler_copy.timesteps[indices].to(device=noise.device)
-
-                            sigmas = get_sigmas(timesteps, n_dim=noise.ndim, dtype=noise.dtype)
-
                             torch.cuda.empty_cache()
 
-                            初始beta = 1 - 0.02
-                            for i in range(args.inference_steps):
-                                beta = 初始beta * (1 - i / args.inference_steps)
-                                alpha = 1 - beta
-                                if i == 0:
-                                    noisy_model_input小 = noise小
-                                else:
-                                    noisy_model_input小 = alpha**0.5 * 教师pred_x0 + beta**0.5 * 教师pred
+                            assert args.teacher_cfg > 1
+                            to = dict(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype)
+                            add_time_ids = torch.cat([compute_time_ids(s, r, c) for s, r, c in zip(batch["original_sizes"], batch["resized_sizes"], batch["crop_top_lefts"])])
+                            zwei_add_time_ids = torch.cat([add_time_ids, add_time_ids], dim=0).to(**to)
+                            cond_prompt_embeds = batch['sdxl_prompt_embeds']
+                            uncond_prompt_embeds = teacher_nega_prompt_embeds
+                            if uncond_prompt_embeds.shape[1] < cond_prompt_embeds.shape[1]:
+                                uncond_prompt_embeds = F.pad(uncond_prompt_embeds, (0, 0, 0, cond_prompt_embeds.shape[1] - uncond_prompt_embeds.shape[1]))
+                            zwei_prompt_embeds = torch.cat([uncond_prompt_embeds, cond_prompt_embeds], dim=0).to(**to)
+                            zwei_pooled_prompt_embeds = torch.cat([teacher_nega_pooled_prompt_embeds, batch['sdxl_pooled_prompt_embeds']], dim=0).to(**to)
+                            latents = noise小.to(device=教师pipeline.unet.device, dtype=torch.float32)
+                            latents = latents * scheduler.init_noise_sigma
+                            scheduler.set_timesteps(args.inference_steps, device=教师pipeline.unet.device)
+                            for i, t in enumerate(scheduler.timesteps):
+                                latent_model_input = torch.cat([latents, latents], dim=0)
+                                latent_model_input = scheduler.scale_model_input(latent_model_input, t)
                                 with 计时(accelerator, global_step, 'unet'):
-                                    add_time_ids = torch.cat(
-                                        [compute_time_ids(s, r, c) for s, r, c in zip(batch["original_sizes"], batch["resized_sizes"], batch["crop_top_lefts"])]
-                                    ).to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype)
-
-                                    timesteps小 = min(range(0, 1000), key=lambda x: abs(alpha - sdxl_time_to_alpha[x]))
-
-                                    教师pred = 教师pipeline.unet(
-                                        noisy_model_input小.to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype),
-                                        timesteps小,
-                                        batch['sdxl_prompt_embeds'].to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype),
-                                        added_cond_kwargs={"time_ids": add_time_ids, "text_embeds": batch['sdxl_pooled_prompt_embeds'].to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype)},
+                                    batched_pred = 教师pipeline.unet(
+                                        sample=latent_model_input.to(**to),
+                                        timestep=t,
+                                        encoder_hidden_states=zwei_prompt_embeds,
+                                        added_cond_kwargs={"time_ids": zwei_add_time_ids, "text_embeds": zwei_pooled_prompt_embeds},
                                         return_dict=False,
-                                    )[0].detach().clone().to(torch.float32)
-                                    if args.teacher_cfg > 1:
-                                        教师pred_uncond = 教师pipeline.unet(
-                                            noisy_model_input小.to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype),
-                                            timesteps小,
-                                            teacher_nega_prompt_embeds.to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype),
-                                            added_cond_kwargs={"time_ids": add_time_ids, "text_embeds": teacher_nega_pooled_prompt_embeds.to(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype)},
-                                            return_dict=False,
-                                        )[0].detach().clone().to(torch.float32)
-                                        教师pred = 教师pred_uncond + args.teacher_cfg * (教师pred - 教师pred_uncond)
-                                    教师pred_x0 = (noisy_model_input小 - beta**0.5 * 教师pred) / alpha**0.5
-
+                                    )[0]
+                                    batched_pred = batched_pred.to(torch.float32)
+                                    教师pred_uncond, 教师pred_cond = batched_pred.chunk(2, dim=0)
+                                    noise_pred = 教师pred_uncond + args.teacher_cfg * (教师pred_cond - 教师pred_uncond)
+                                    latents = scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                            教师pred_x0 = latents.detach().clone()
                             latents_to_decode = 教师pred_x0 / 教师pipeline.vae.config.scaling_factor
+                            latents_to_decode = latents_to_decode.to(dtype=教师pipeline.vae.dtype)
                             image_pixels = 教师pipeline.vae.decode(latents_to_decode, return_dict=False)[0]
 
                             # if args.quick_test:
@@ -835,17 +862,21 @@ def main(args):
                             #     image.save(f'fk/{int(timesteps)}_教师pred_x0_pixels.png')
                             #     with open(f'fk/{int(timesteps)}_prompt.txt', 'w', encoding='utf8') as f:
                             #         f.write(str(batch['teacher_prompts']))
-
                             image_pixels = torch.clamp(image_pixels, min=-1.0, max=1.0)
                             target_x0_sd3 = flux_vae_encode(vae, image_pixels)
-
-                            noisy_model_input = (1.0 - sigmas) * target_x0_sd3 + sigmas * noise
-                            batch['timesteps'] = timesteps.to('cpu')
-                            batch['sigmas'] = sigmas
-                            batch['noisy_model_input'] = Flux2KleinPipeline._patchify_latents(noisy_model_input.to('cpu'))
-                            batch['target_v'] = Flux2KleinPipeline._patchify_latents(noise - target_x0_sd3)
+                            batch['noise'] = noise.cpu()
+                            batch['target_x0_sd3'] = target_x0_sd3.cpu()
+                        del latents, 教师pred_x0, latents_to_decode, image_pixels, noise小, noise, zwei_prompt_embeds, zwei_pooled_prompt_embeds, zwei_add_time_ids
                         for i in [vae, 教师pipeline.vae, 教师pipeline.unet]:
                             i.to('cpu')
+
+                    with 计时(accelerator, global_step, 'sample_latent'):
+                        batch_buffer_n = []
+                        for batch in batch_buffer:
+                            batch_buffer_n.extend(batch_n_sample(batch))
+                        random.shuffle(batch_buffer_n)
+                        batch_buffer = batch_buffer_n
+
                     with 计时(accelerator, global_step, 'clean'):
                         clean()
                 transformer.to(accelerator.device)
@@ -865,7 +896,7 @@ def main(args):
                 timesteps = batch['timesteps'].to(accelerator.device)
                 noisy_model_input = batch['noisy_model_input'].to(accelerator.device)
                 target = batch['target_v'].to(accelerator.device)
-                sigmas = batch['sigmas']
+                sigmas = batch['sigmas'].to(accelerator.device)
                 packed_noisy_model_input = Flux2KleinPipeline._pack_latents(noisy_model_input)
                 model_input_ids = Flux2KleinPipeline._prepare_latent_ids(noisy_model_input).to(device=accelerator.device)
 
@@ -892,16 +923,22 @@ def main(args):
                 model_pred_v = model_pred_v[:, : packed_noisy_model_input.size(1) :]
                 model_pred_v = Flux2KleinPipeline._unpack_latents_with_ids(model_pred_v, model_input_ids)
 
-                # if args.quick_test:
-                #     model_pred_x0 = model_pred_v * (-sigmas) + noisy_model_input
-                #     with torch.no_grad():
-                #         vae.to(accelerator.device)
-                #         for latent, 名字 in [(model_pred_x0, '学生pred_x0'), (noisy_model_input, 'xt')]:
-                #             latent = latent * latents_bn_std + latents_bn_mean
-                #             image = vae.decode(Flux2KleinPipeline._unpatchify_latents(latent).to(device=vae.device, dtype=vae.dtype), return_dict=False)[0]
-                #             image = text_encoding_pipeline.image_processor.postprocess(image, output_type='pil')[0]
-                #             image.save(f'fk/{int(timesteps)}_{名字}.png')
-                #         vae.to('cpu')
+                if args.quick_test:
+                    model_pred_x0 = model_pred_v * (-sigmas) + noisy_model_input
+                    with torch.no_grad():
+                        transformer.to('cpu')
+                        vae.to(accelerator.device)
+                        存档文件夹 = f'{args.output_dir}/quick_test_image_cfg{args.teacher_cfg}_n{args.inference_steps}'
+                        os.makedirs(存档文件夹, exist_ok=True)
+                        for latent, 名字, use_patchify in [(model_pred_x0, '学生pred_x0', False), (noisy_model_input, 'xt', False), (batch['target_x0_sd3'], '教师x0', True)]:
+                            if use_patchify:
+                                latent = Flux2KleinPipeline._patchify_latents(latent)
+                            latent = latent.to(accelerator.device) * latents_bn_std + latents_bn_mean
+                            image = vae.decode(Flux2KleinPipeline._unpatchify_latents(latent).to(device=vae.device, dtype=vae.dtype), return_dict=False)[0]
+                            image = text_encoding_pipeline.image_processor.postprocess(image, output_type='pil')[0]
+                            image.save(f'{存档文件夹}/step{global_step}_{batch["标记"]}_{int(timesteps)}_{名字}.png')
+                        vae.to('cpu')
+                        transformer.to(accelerator.device)
 
                 weighting = compute_loss_weighting_for_sd3(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
                 loss = torch.mean(
@@ -909,6 +946,7 @@ def main(args):
                     1,
                 )
                 loss = loss.mean()
+                del model_pred_v, target, packed_noisy_model_input, model_input_ids, 超prompt_embeds, 超text_ids, noisy_model_input, sigmas, weighting
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     grad_norm = accelerator.clip_grad_norm_(transformer.parameters(), args.max_grad_norm)
@@ -987,7 +1025,7 @@ def main(args):
                 save_path = os.path.join(checkpoint_dir, f"checkpoint-{global_step}")
                 accelerator.save_state(save_path)
                 # windows上有内存泄漏。不过我不确定是不是windows的问题，总之先这样屏蔽1下吧。
-                if platform.system() == 'Windows' and global_step % (args.checkpointing_steps * 10) == 0:
+                if platform.system() == 'Windows' and global_step % 40000 == 0:
                     exit()
 
         if global_step >= args.max_train_steps:

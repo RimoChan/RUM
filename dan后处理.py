@@ -61,7 +61,8 @@ class dan后处理:
             rating标签 = []
 
         if 学人:
-            画师标签 = []
+            if random.random() < 0.5:
+                画师标签 = []
             时间标签 = []
             rating标签 = []
 
