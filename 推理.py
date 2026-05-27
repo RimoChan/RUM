@@ -11,8 +11,6 @@ from 哭 import 哭model
 
 sdxl = "C:/Users/Administrator/Desktop/models/waiNSFWIllustrious_v140.safetensors"
 
-from diffusers.pipelines.flux2.pipeline_flux2_klein import *
-
 
 class 哭Pipeline(Flux2KleinPipeline):
     def 上床(self, prompt):
@@ -59,4 +57,4 @@ for width in [960]:
                         guidance_scale=guidance_scale,
                         width=width,
                         height=height,
-                    ).images[0].save(f'测试输出/output_{i}_cfg{guidance_scale}_seed{seed}_n{num_inference_steps}_{width}×{height}.png')
+                    ).images[0].save(f'output_{i}_cfg{guidance_scale}_seed{seed}_n{num_inference_steps}_{width}×{height}.png')
