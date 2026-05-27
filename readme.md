@@ -60,7 +60,7 @@
 
 在RTX5090上，每天可以训34000个step<sub>(对于Flux2-klein-4B是21000个)</sub>。训练1个月就可以得到1个还算能用的模型了。
 
-5090单卡的租赁价格大概是每天$5，这样1个月成本才1g黄金<sub>(恢复金本位制，耶！)</sub>，原本继续预训练1个动漫模型，典型的花费大概是$10000，这样1下就省了99%的钱啦！当然这个对比其实不公平，正规的$10000的模型其实效果要比我这个好很多。
+5090单卡的租赁价格大概是每天$5，这样1个月成本才1g黄金<sub>(恢复金本位制，耶！)</sub>，原本继续预训练1个动漫模型，典型的花费大概是$10000，这样1下就省了97%的钱啦！当然这个对比其实不公平，正规的$10000的模型其实效果要比我这个好很多。
 
 然后是显存问题，大家可能会担心，说加载这么多模型，5090居然放得下吗。确实是放不下的，所以实际上这些模型是半在线的，代码是这样预计算的: 每轮先加载50个样本，然后用TE/VAE/SDXL把我们前面说的Xt2、X02什么的全部都算出来，然后把这些模型放回RAM，最后再训练50个step的DiT。这样的话bf16混合精度峰值VRAM大约是31G，纯bf16的话可能24G的4090也能训。
 
@@ -91,20 +91,15 @@
 
 我把权重放在了huggingface的[RUM-FLUX.2-klein-4B-preview](https://huggingface.co/rimochan/RUM-FLUX.2-klein-4B-preview/tree/main)，大家可以下载回来试1试。
 
-下面是训练到608k step的效果。能看出模型的prompt遵循还是很好的，但是细节有问题，基本上手指没有1张是不崩溃的，角色也画得不是很像。
+下面是训练到908k step的效果。能看出模型的prompt遵循还是很好的，但是细节有问题，基本上手指没有1张是不崩溃的，角色也画得不是很像。
 
-不过好在现在训练成本才只要$145，然后指标也还在涨，我反正就放着继续训，可能下个月它就如臻化境了！
+不过好在现在训练成本才只要$300，然后指标也还在涨，我反正就放着继续训，可能下个月它就如臻化境了！
 
-<img src='img/flux_608000.webp' width='1000px'>
-
-样例的prompt分别是:
-
-- `1girl, kisaki (blue archive), eating baozi, sitting, indoors`
-- `1girl, momoi (blue archive), typing on keyboard, computer, animal ear headphones, sitting, angry, indoors, newest`
-- `1girl, yuuka (blue archive), holding cup, sitting, indoors, kantoku, newest`
-- `1girl, hoshino (blue archive), eating pizza, sitting, indoors`
+<img src='img/flux_908000.webp' width='1000px'>
 
 不过坏消息是我加了1路CLIP之后，ComfyUI跑不了了，有没有人来帮我适配1下ComfyUI呀？现在只能用diffusers跑了，推理代码就是根目录下的`推理.py`，模型路径和prompt都硬编码在文件里，改1下常量然后用python跑就可以了。
+
+此外，样例的prompt也在`推理.py`文件里可以复现。
 
 对了，这个是Flux2-klein，上面的指标曲线是SD3.5，大家不要看错了以为我没放后面的step。
 

@@ -21,7 +21,7 @@ from tensorboard.compat.proto import summary_pb2
 def 计时(accelerator, global_step, 名字):
     开始时间 = time.time()
     yield
-    if accelerator.is_main_process:
+    if accelerator and accelerator.is_main_process:
         accelerator.log({f'【计时】{名字}': time.time() - 开始时间}, step=global_step)
 
 
@@ -267,21 +267,21 @@ def 看看显存(device='cuda:0'):
 
 
 validation_prompt = [
-    ('1girl, kisaki (blue archive), eating baozi, sitting, indoors, huwari (dnwls3010)', 1),
+    ('1girl, kisaki (blue archive), eating baozi, sitting, indoors, mignon', 1),
     ('1girl, black twintails, school uniform, outdoors, street, fullbody, black pantyhose, holding phone, looking at phone, > <, kani biimu', 2),
     ('1girl, twintails, cat ears, maid, maid headdress, holding tray, white pantyhose, indoors, kitchen, momoko (momopoco), newest', 3),
     ('1girl, momoi (blue archive), typing on keyboard, computer, sitting, angry, indoors, fuzichoco, newest', 4),
     ('1girl, yuuka (blue archive), holding cup, sitting, indoors, kantoku, newest', 5),
-    ('1girl, azusa (blue archive), eating pizza, sitting, indoors, fuzichoco', 6),
+    ('1girl, azusa (blue archive), eating pizza, sitting, indoors, chen bin', 6),
 ]
 
 validation_prompt_reform = [
-    ('1girl, character kisaki (blue archive), eating baozi, sitting, indoors, artist huwari (dnwls3010)', 1),
+    ('1girl, character kisaki (blue archive), eating baozi, sitting, indoors, artist mignon', 1),
     ('1girl, character black twintails, school uniform, outdoors, street, fullbody, black pantyhose, holding phone, looking at phone, > <, artist kani biimu', 2),
     ('1girl, twintails, cat ears, maid, maid headdress, holding tray, white pantyhose, indoors, kitchen, artist momoko (momopoco), newest', 3),
     ('1girl, character momoi (blue archive), typing on keyboard, computer, sitting, angry, indoors, artist fuzichoco, newest', 4),
     ('1girl, character yuuka (blue archive), holding cup, sitting, indoors, artist kantoku, newest', 5),
-    ('1girl, character azusa (blue archive), eating pizza, sitting, indoors, artist fuzichoco', 6),
+    ('1girl, character azusa (blue archive), eating pizza, sitting, indoors, artist chen bin', 6),
 ]
 
 

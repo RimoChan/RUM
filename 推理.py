@@ -7,23 +7,26 @@ from 哭 import 哭model
 
 # 原 = "R:/models/FLUX.2-klein-base-4B"
 原 = "C:/Users/Administrator/Desktop/FLUX.2-klein-base-4B"
-# 新 = "R:/lora切/fk/5F3-243-AFC-muon-lr1.2e-05-0.75-6-drop0.1&0.1&0.6-bf16-SS1.0-n4-cfg1.5-logit_normal_-2.2_1.3-学人0.5-Muon40.0-哭2/checkpoint-420000/model.safetensors"
-新 = "R:/lora切/fk/5F3-243-AFC-muon-lr6e-06-0.8-6-drop0.1&0.1&0.6-bf16-SS1.0-n4-cfg1.5-logit_normal_-1.9_1.3-学人0.5-Muon40.0-哭/checkpoint-608000/model.safetensors"
-# 新 = "C:/Users/Administrator/Desktop/checkpoint-528000/model.safetensors"
-sdxl = "C:/Users/Administrator/Desktop/models/waiIllustriousSDXL_v160.safetensors"
+新 = r"R:\RUM-FLUX.2-klein-4B-preview\model-checkpoint-908000.safetensors"
+
+sdxl = "C:/Users/Administrator/Desktop/models/waiNSFWIllustrious_v140.safetensors"
+
+from diffusers.pipelines.flux2.pipeline_flux2_klein import *
 
 
 class 哭Pipeline(Flux2KleinPipeline):
-    @torch.no_grad()
-    def __call__(self, *, prompt, **kwargs):
+    def 上床(self, prompt):
         prompt_embeds, _ = self.encode_prompt(
             prompt=prompt,
             max_sequence_length=200,
             text_encoder_out_layers=[10, 20, 30],
         )
         sdxl_prompt_embeds, *_ = 教师pipeline.encode_prompt(prompt)
-        超prompt_embeds = torch.cat([prompt_embeds, F.pad(sdxl_prompt_embeds.to('cuda'), (0, 7680 - 2048))], dim=1).to(torch.bfloat16)
-        return super().__call__(prompt_embeds=超prompt_embeds, **kwargs)
+        return torch.cat([prompt_embeds, F.pad(sdxl_prompt_embeds.to('cuda'), (0, 7680 - 2048))], dim=1).to(torch.bfloat16)
+
+    @torch.inference_mode()
+    def __call__(self, *, prompt, **kwargs):
+        return super().__call__(prompt_embeds=self.上床(prompt), negative_prompt_embeds=self.上床(''), **kwargs)
 
 
 transformer = 哭model.from_pretrained(原, subfolder="transformer")
@@ -37,20 +40,23 @@ pipeline.to('cuda')
 
 
 validation_prompt = [
-    ('1girl, kisaki (blue archive), eating baozi, sitting, indoors', 1),
-    ('1girl, momoi (blue archive), typing on keyboard, computer, animal ear headphones, sitting, angry, indoors, newest', 2),
-    ('1girl, yuuka (blue archive), holding cup, sitting, indoors, kantoku, newest', 3),
-    ('1girl, hoshino (blue archive), eating pizza, sitting, indoors', 4),
-    ('1girl, kisaki (blue archive), 校服, 室外, 拿着饮料', 1),
+    ('1girl, kisaki (blue archive), holding baozi, eating, sitting, indoors, momoko (momopoco)', 1),
+    ('1girl, momoi (blue archive), typing on keyboard, computer, animal ear headphones, sitting, angry, indoors, mika pikazo', 2),
+    ('1girl, yuuka (blue archive), holding cup, sitting, indoors, fuzichoco', 3),
+    ('1girl, mika (blue archive), holding pizza, eating, sitting, indoors, huwari (dnwls3010)', 4),
 ]
 
 
-for i, (prompt, seed) in enumerate(validation_prompt):
-    pipeline(
-        prompt=prompt,
-        generator=torch.Generator(device='cpu').manual_seed(seed),
-        num_inference_steps=20,
-        guidance_scale=5,
-        width=960,
-        height=1024,
-    ).images[0].save(f'output_{i}.png')
+for width in [960]:
+    for height in [1024]:
+        for guidance_scale in [9]:
+            for num_inference_steps in [20]:
+                for i, (prompt, seed) in enumerate(validation_prompt):
+                    pipeline(
+                        prompt=prompt,
+                        generator=torch.Generator(device='cpu').manual_seed(seed),
+                        num_inference_steps=num_inference_steps,
+                        guidance_scale=guidance_scale,
+                        width=width,
+                        height=height,
+                    ).images[0].save(f'测试输出/output_{i}_cfg{guidance_scale}_seed{seed}_n{num_inference_steps}_{width}×{height}.png')

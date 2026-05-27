@@ -1,3 +1,4 @@
+import json
 import random
 from torchvision import transforms
 from torchvision.transforms.functional import crop
@@ -11,6 +12,17 @@ train_transforms = transforms.Compose(
         transforms.Normalize([0.5], [0.5]),
     ]
 )
+
+
+画师top500 = json.load(open('画师.json'))
+画师好 = json.load(open('好画师.json'))
+
+
+def _抽取画师():
+    if random.random() < 0.5:
+        return random.choice(画师top500)
+    else:
+        return random.choice(画师好)
 
 
 class dan后处理:
@@ -32,7 +44,7 @@ class dan后处理:
         random.shuffle(剩下的标签)
 
         if 学人:
-            保留标签数 = min(random.randint(2, 5), len(剩下的标签))
+            保留标签数 = min(random.randint(1, 5), len(剩下的标签))
         else:
             保留标签数 = len(剩下的标签) * (1 - self.drop_tag_rate)
             if 保留标签数 > 15:
@@ -46,14 +58,16 @@ class dan后处理:
                 if random.random() < self.drop_char_feature_rate and 签 in 剩下的标签:
                     剩下的标签.remove(签)
 
-        画师标签 = d['tag_string_artist']
-        画师标签 = [画师标签]
+        if random.random() < 0.2:
+            画师标签 = [_抽取画师(), _抽取画师()]
+        else:
+            画师标签 = [_抽取画师()]
 
         时间标签 = 计算时间标签(d['created_at'])
 
         rating标签 = [rating_map[d['rating']]]
 
-        if random.random() < 0.1:
+        if random.random() < 0.2:
             画师标签 = []
         if random.random() < 0.5:
             时间标签 = []
@@ -61,7 +75,7 @@ class dan后处理:
             rating标签 = []
 
         if 学人:
-            if random.random() < 0.5:
+            if random.random() < 0.1:
                 画师标签 = []
             时间标签 = []
             rating标签 = []
