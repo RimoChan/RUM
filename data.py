@@ -181,15 +181,7 @@ def prefetch(it, accelerator, global_step, reform_prompt, prefetch_steps, drop_t
 
 
 # python data.py --all_ep=101,102 --train_data_dir=X:/image_balance大_2024 --pretrained_model_name_or_path="R:/models/FLUX.2-klein-base-4B" --teacher_model_name_or_path="S:/Stable-diffusion-models/Stable-diffusion/waiNSFWIllustrious_v140.safetensors" --output_dir="x:/RUM缓存_勇气2"
-# python data.py --all_ep=202,203 --train_data_dir=X:/image_balance大_2024 --pretrained_model_name_or_path="C:/Users/Administrator/Desktop/FLUX.2-klein-base-4B" --teacher_model_name_or_path="C:/Users/Administrator/Desktop/models/waiNSFWIllustrious_v140.safetensors" --output_dir="x:/RUM缓存_勇气2"
-
-
-def _dump到硬盘(a: list[dict], output_dir: str, ep):
-    for d in a:
-        d['prompt_embeds'] = d['prompt_embeds'].to(torch.bfloat16)
-        with open(f'{output_dir}/ep{ep}_{i}.pkl', 'wb') as f:
-            pickle.dump(d, f)
-        i += 1
+# python data.py --all_ep=204,205 --train_data_dir=X:/image_balance大_2024 --pretrained_model_name_or_path="C:/Users/Administrator/Desktop/FLUX.2-klein-base-4B" --teacher_model_name_or_path="C:/Users/Administrator/Desktop/models/waiNSFWIllustrious_v140.safetensors" --output_dir="x:/RUM缓存_勇气2"
 
 
 def _ember(all_ep, train_data_dir, pretrained_model_name_or_path, teacher_model_name_or_path, output_dir):
@@ -253,6 +245,15 @@ def _ember(all_ep, train_data_dir, pretrained_model_name_or_path, teacher_model_
         num_workers=1,
     )
     pool = ThreadPoolExecutor(max_workers=1)
+
+    def _dump到硬盘(a: list[dict], output_dir: str, ep):
+        nonlocal i
+        for d in a:
+            d['prompt_embeds'] = d['prompt_embeds'].to(torch.bfloat16)
+            with open(f'{output_dir}/ep{ep}_{i}.pkl', 'wb') as f:
+                pickle.dump(d, f)
+            i += 1
+
     for ep in all_ep:
         i = 0
         it = iter(train_dataloader)

@@ -77,7 +77,7 @@ def encode_prompt(prompt_batch, compel) -> tuple:
         return t
 
 
-def 生成optimizer(args_optimizer, unet, adam_beta1, adam_beta2, adam_weight_decay, adam_epsilon, learning_rate, learning_rate_muon, embedder_2_k=1, muon_weight_decay=0.01):
+def 生成optimizer(args_optimizer, unet, adam_beta1, adam_beta2, adam_weight_decay, adam_epsilon, learning_rate, learning_rate_muon, embedder_2_k, muon_weight_decay):
     import torch
     if 'adam' in args_optimizer:
         if args_optimizer == 'adam':
@@ -96,9 +96,7 @@ def 生成optimizer(args_optimizer, unet, adam_beta1, adam_beta2, adam_weight_de
             eps=adam_epsilon,
         )
     elif args_optimizer == 'prodigy':
-        from prodigyopt import Prodigy
-        params_to_optimize = unet.parameters()
-        optimizer = Prodigy(params_to_optimize, lr=1., weight_decay=muon_weight_decay, slice_p=11, safeguard_warmup=True, use_bias_correction=True)
+        raise NotImplementedError
     elif args_optimizer == 'muon':
         from muon import SingleDeviceMuonWithAuxAdam, MuonWithAuxAdam
         hidden_weights = {k: p for k, p in unet.named_parameters() if is_muon(k, p) and p.requires_grad}
@@ -110,7 +108,7 @@ def 生成optimizer(args_optimizer, unet, adam_beta1, adam_beta2, adam_weight_de
                 del hidden_gains_biases[k]
         print(f'使用muon层: {len(hidden_weights)}个，不用muon层: {len(hidden_gains_biases)}个，大: {len(hidden_embedder_2)}个。')
         param_groups = [
-            dict(params=[*hidden_weights.values()], use_muon=True, lr=learning_rate_muon, weight_decay=0.01),
+            dict(params=[*hidden_weights.values()], use_muon=True, lr=learning_rate_muon, weight_decay=muon_weight_decay),
             dict(params=[*hidden_gains_biases.values()], use_muon=False, lr=learning_rate, betas=(adam_beta1, adam_beta2), weight_decay=adam_weight_decay),
             dict(params=[*hidden_embedder_2.values()], use_muon=False, lr=learning_rate*embedder_2_k, betas=(adam_beta1, adam_beta2), weight_decay=adam_weight_decay),
         ]

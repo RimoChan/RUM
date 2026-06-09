@@ -9,6 +9,7 @@ import pickle
 import logging
 import platform
 import argparse
+import itertools
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,7 @@ import torch
 import torch.utils.checkpoint
 import torch.nn.functional as F
 import transformers
+from safetensors.torch import load_file
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration, set_seed
@@ -63,15 +65,20 @@ def log_validation(
 ):
     images = []
     with torch.inference_mode():
-        for prompt, seed in validation_prompt:
-            images.append(pipeline(
-                prompt=prompt,
-                generator=torch.Generator(device=accelerator.device).manual_seed(seed),
-                num_inference_steps=20,
-                guidance_scale=guidance_scale,
-                width=704,
-                height=1024,
-            ).images[0])
+        for num_inference_steps in [20]:
+            for prompt, seed in validation_prompt:
+                images.append(pipeline(
+                    prompt=prompt,
+                    generator=torch.Generator(device=accelerator.device).manual_seed(seed),
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    width=704,
+                    height=1024,
+                ).images[0])
+            for tracker in accelerator.trackers:
+                if tracker.name == "tensorboard":
+                    concat_image = np.concatenate([np.asarray(img) for img in images], axis=1)
+                    add_image_jpeg(tracker.writer, f"validation-cfg{guidance_scale}-n{num_inference_steps}", concat_image, global_step)
         clean()
         if global_step > 0:
             pipeline.set_progress_bar_config(disable=True)
@@ -82,13 +89,33 @@ def log_validation(
                 分数 = 评测pipeline(pipeline, n_iter=args.validation_n_iter, guidance_scale=guidance_scale)
                 前缀 = '分数'
             accelerator.log({f"{前缀}-cfg{guidance_scale}": 分数}, step=global_step)
-    for tracker in accelerator.trackers:
-        if tracker.name == "tensorboard":
-            concat_image = np.concatenate([np.asarray(img) for img in images], axis=1)
-            add_image_jpeg(tracker.writer, f"validation-cfg{guidance_scale}", concat_image, global_step)
     del pipeline
     clean()
-    return images
+
+
+@torch.no_grad()
+def 褪色(model, safetensors_path, alpha=0.99):
+    beta = 1.0 - alpha
+    total_diff = 0.0
+    missing_keys = []
+
+    b = load_file(safetensors_path)
+    for name, param in model.named_parameters():
+        if name not in b:
+            missing_keys.append(name)
+            continue
+        orig_tensor = b[name].to(param.device)
+        target_dtype = param.dtype
+        current_fp32 = param.data.to(torch.float32)
+        orig_fp32 = orig_tensor.to(torch.float32)
+        total_diff += (param.numel() * torch.mean(torch.abs(current_fp32 - orig_fp32))).item()
+        new_fp32 = (alpha * current_fp32) + (beta * orig_fp32)
+        param.data.copy_(new_fp32.to(target_dtype))
+
+    if missing_keys:
+        print(f"这些参数找不到了: {missing_keys} ...")
+    clean()
+    return total_diff
 
 
 def parse_args(input_args=None):
@@ -182,6 +209,11 @@ def parse_args(input_args=None):
         "--checkpointing_steps",
         type=int,
         default=500,
+    )
+    parser.add_argument(
+        "--fade_steps",
+        type=int,
+        default=0,
     )
     parser.add_argument(
         "--resume_from_checkpoint",
@@ -287,9 +319,6 @@ def parse_args(input_args=None):
     )
     parser.add_argument("--adam_weight_decay", type=float, default=1e-04)
     parser.add_argument("--muon_weight_decay", type=float, default=1e-02)
-    parser.add_argument(
-        "--adam_weight_decay_text_encoder", type=float, default=1e-03, help="Weight decay to use for text_encoder"
-    )
 
     parser.add_argument(
         "--adam_epsilon",
@@ -649,7 +678,6 @@ def main(args):
             lr_scheduler = accelerator.prepare(lr_scheduler)
     else:
         if args.resume_transformer:
-            from safetensors.torch import load_file
             transformer.load_state_dict(load_file(args.resume_transformer))
             global_step = initial_global_step = 0
         else:
@@ -856,20 +884,21 @@ def main(args):
         if accelerator.sync_gradients:
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], "grad_norm": grad_norm.item()}
             progress_bar.set_postfix(**logs)
-            if timesteps[0] > 800:
-                logs = logs | {
-                    'grad_norm_大于800': logs['grad_norm'],
-                    'loss_大于800': logs['loss'],
-                }
-            else:
-                logs = logs | {
-                    'grad_norm_小于800': logs['grad_norm'],
-                    'loss_小于800': logs['loss'],
-                }
-            accelerator.log(logs, step=global_step)
+            for a, b in itertools.pairwise([1000, 900, 800, 0]):
+                if a >= timesteps[0] >= b:
+                    logs = logs | {
+                        f'grad_norm_{a}到{b}': logs['grad_norm'],
+                        f'loss_{a}到{b}': logs['loss'],
+                    }
+                    accelerator.log(logs, step=global_step)
+                    break
             progress_bar.update(1)
             accelerator.log({"len_tag": batch.get('prompts', '没有')[0].count(','), "t": timesteps[0]}, step=global_step)
             global_step += 1
+            if args.fade_steps > 0 and global_step % args.fade_steps == 2:
+                clean()
+                权重diff = 褪色(transformer, args.pretrained_model_name_or_path + '/transformer/diffusion_pytorch_model.safetensors')
+                accelerator.log({"权重diff": 权重diff}, step=global_step)
             if accelerator.is_main_process and global_step % args.checkpointing_steps == 0:
                 if args.checkpoints_total_limit is not None and os.path.exists(checkpoint_dir):
                     checkpoints = [d for d in os.listdir(checkpoint_dir) if d.startswith("checkpoint")]
