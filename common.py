@@ -18,12 +18,14 @@ from tensorboard.compat.proto import summary_pb2
 
 
 @contextlib.contextmanager
-def 计时(accelerator, global_step, 名字):
+def 计时(accelerator, global_step, 名字, stdout=False):
     开始时间 = time.time()
     yield
     if accelerator and accelerator.is_main_process:
-        accelerator.log({f'【计时】{名字}': time.time() - 开始时间}, step=global_step)
-
+        t = time.time() - 开始时间
+        accelerator.log({f'【计时】{名字}': t}, step=global_step)
+        if stdout:
+            print(f'【计时】{名字}', t)
 
 def 哈(x) -> str:
     return hashlib.md5(str(x).encode()).hexdigest().upper()[:3]
@@ -172,7 +174,7 @@ def 评测pipeline(pipe, n_iter, tags_seed=0, random_seed=0, guidance_scale=7):
         images = pipe(
             prompt=f'1 girl, {", ".join(标签组)}',
             generator=torch.Generator(device='cuda').manual_seed(rd.randint(0, 2**16)),
-            num_inference_steps=18+rd.randint(0, 6),
+            num_inference_steps=20,
             guidance_scale=guidance_scale,
             width=704+rd.randint(0, 5)*64,
             height=704+rd.randint(0, 5)*64,

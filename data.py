@@ -65,6 +65,7 @@ def 生成dataset(accelerator, train_data_dir, drop_tag_rate, drop_char_feature_
     dataset = load_dataset(
         "imagefolder",
         data_files={"train": os.path.join(train_data_dir, "**")},
+        verification_mode="no_checks",
     )
     if accelerator:
         with accelerator.main_process_first():
@@ -84,8 +85,10 @@ def prefetch(it, accelerator, global_step, reform_prompt, prefetch_steps, drop_t
         with 计时(accelerator, global_step, 'dataloader'):
             while len(batch_buffer) < prefetch_steps:
                 batch = next(it)
+                if any([i in batch['prompts'][0] for i in ['4girls', '5girls', '6+girls']]):
+                    continue
                 h, w = batch['pixel_values'].shape[2:]
-                if h / w > 4 or w / h > 4:
+                if h / w > 3.1 or w / h > 3.1:
                     continue
                 batch_buffer.append(batch)
                 if reform_prompt:
@@ -164,6 +167,7 @@ def prefetch(it, accelerator, global_step, reform_prompt, prefetch_steps, drop_t
                 image_pixels = 教师pipeline.vae.decode(latents_to_decode, return_dict=False)[0]
 
                 image_pixels = torch.clamp(image_pixels, min=-1.0, max=1.0)
+                # batch['test_image_pixels'] = image_pixels.cpu()
                 target_x0_sd3 = flux_vae_encode(vae, image_pixels, latents_bn_mean, latents_bn_std)
                 batch['noise'] = noise.cpu()
                 batch['target_x0_sd3'] = target_x0_sd3.cpu()
@@ -180,11 +184,11 @@ def prefetch(it, accelerator, global_step, reform_prompt, prefetch_steps, drop_t
     return batch_buffer
 
 
-# python data.py --all_ep=101,102 --train_data_dir=X:/image_balance大_2024 --pretrained_model_name_or_path="R:/models/FLUX.2-klein-base-4B" --teacher_model_name_or_path="S:/Stable-diffusion-models/Stable-diffusion/waiNSFWIllustrious_v140.safetensors" --output_dir="x:/RUM缓存_勇气2"
-# python data.py --all_ep=204,205 --train_data_dir=X:/image_balance大_2024 --pretrained_model_name_or_path="C:/Users/Administrator/Desktop/FLUX.2-klein-base-4B" --teacher_model_name_or_path="C:/Users/Administrator/Desktop/models/waiNSFWIllustrious_v140.safetensors" --output_dir="x:/RUM缓存_勇气2"
+# python data.py --all_ep=1002,1003 --train_data_dir=X:/image_balance大_2024 --pretrained_model_name_or_path="R:/models/FLUX.2-klein-base-4B" --teacher_model_name_or_path="S:/Stable-diffusion-models/Stable-diffusion/waiNSFWIllustrious_v140.safetensors" --output_dir="R:/RUM缓存_谨慎" --inference_steps=25 --prefetch_steps=200 --学人rate=0.4
+# python data.py --all_ep=2003,2004 --train_data_dir=X:/image_balance大_2024 --pretrained_model_name_or_path="C:/Users/Administrator/Desktop/FLUX.2-klein-base-4B" --teacher_model_name_or_path="C:/Users/Administrator/Desktop/models/waiNSFWIllustrious_v140.safetensors" --output_dir="R:/RUM缓存_谨慎" --inference_steps=25 --prefetch_steps=200 --学人rate=0.2
 
 
-def _ember(all_ep, train_data_dir, pretrained_model_name_or_path, teacher_model_name_or_path, output_dir):
+def _ember(all_ep, train_data_dir, pretrained_model_name_or_path, teacher_model_name_or_path, output_dir, min_size=640, max_size=1280, 学人rate=0.5, prefetch_steps=200, inference_steps=25, teacher_cfg=7, seed=None):
     import time
     import pickle
     from diffusers import StableDiffusionXLPipeline, Flux2KleinPipeline
@@ -195,18 +199,14 @@ def _ember(all_ep, train_data_dir, pretrained_model_name_or_path, teacher_model_
     from concurrent.futures import ThreadPoolExecutor
 
     os.makedirs(output_dir, exist_ok=True)
-    set_seed(int(time.time()))
+    if seed is None:
+        seed = int(time.time())
+    set_seed(seed)
 
-    学人rate = 0.5
     drop_tag_rate = 0.1
     drop_text_rate = 0.05
     drop_char_feature_rate = 0.6
     reform_prompt = False
-    prefetch_steps = 200
-    teacher_cfg = 6.5
-    inference_steps = 16
-    min_size = 576
-    max_size = 1280
 
     tokenizer = Qwen2TokenizerFast.from_pretrained(pretrained_model_name_or_path, subfolder="tokenizer")
     text_encoder = Qwen3ForCausalLM.from_pretrained(pretrained_model_name_or_path, subfolder="text_encoder")
@@ -252,6 +252,10 @@ def _ember(all_ep, train_data_dir, pretrained_model_name_or_path, teacher_model_
             d['prompt_embeds'] = d['prompt_embeds'].to(torch.bfloat16)
             with open(f'{output_dir}/ep{ep}_{i}.pkl', 'wb') as f:
                 pickle.dump(d, f)
+            # from torchvision.utils import save_image
+            # save_image(d['test_image_pixels'], f'{output_dir}/ep{ep}_{i}.png', normalize=True, value_range=(-1, 1))
+            # with open(f'{output_dir}/ep{ep}_{i}.txt', 'w') as f:
+            #     f.write(str(d['teacher_prompts']))
             i += 1
 
     for ep in all_ep:

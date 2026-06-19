@@ -57,6 +57,10 @@ class dan后处理:
             for 签 in 人物特征标签表.get(角色, []):
                 if random.random() < self.drop_char_feature_rate and 签 in 剩下的标签:
                     剩下的标签.remove(签)
+        
+        for 坏标签 in ['oekaki', 'monochrome', 'greyscale', 'greyscale_with_colored_background', 'artist_name', 'signature', 'twitter_username', 'speech_bubble', 'limited_palette', 'sketch', 'typo']:
+            if 坏标签 in 剩下的标签 and random.random() < 0.9:
+                剩下的标签.remove(坏标签)
 
         if random.random() < 0.2:
             画师标签 = [_抽取画师(), _抽取画师()]

@@ -7,7 +7,7 @@ from 哭 import 哭model
 
 # 原 = "R:/models/FLUX.2-klein-base-4B"
 原 = "C:/Users/Administrator/Desktop/FLUX.2-klein-base-4B"
-新 = r"R:\RUM-FLUX.2-klein-4B-preview\model-checkpoint-908000.safetensors"
+新 = r"R:\RUM-FLUX.2-klein-4B-preview\model-checkpoint-1158000.safetensors"
 
 sdxl = "C:/Users/Administrator/Desktop/models/waiNSFWIllustrious_v140.safetensors"
 
@@ -38,15 +38,15 @@ pipeline.to('cuda')
 
 
 validation_prompt = [
-    ('1girl, kisaki (blue archive), holding baozi, eating, sitting, indoors, momoko (momopoco)', 1),
-    ('1girl, momoi (blue archive), typing on keyboard, computer, animal ear headphones, sitting, angry, indoors, mika pikazo', 2),
-    ('1girl, yuuka (blue archive), holding cup, sitting, indoors, fuzichoco', 3),
-    ('1girl, mika (blue archive), holding pizza, eating, sitting, indoors, huwari (dnwls3010)', 4),
+    ('1girl, kisaki (blue archive), holding baozi, eating, indoors, momoko (momopoco)', 1),
+    ('1girl, momoi (blue archive), typing on keyboard, computer, blue necktie, open coat, multicolored coat, angry, indoors, ameto yuki', 2),
+    ('1girl, yuuka (blue archive), holding cup, white jacket, black jacket, blue necktie, indoors, fuzichoco', 3),
+    ('1girl, azusa (blue archive), holding pizza, eating, indoors, chen bin', 4),
 ]
 
 
 for width in [960]:
-    for height in [1024]:
+    for height in [1152]:
         for guidance_scale in [9]:
             for num_inference_steps in [20]:
                 for i, (prompt, seed) in enumerate(validation_prompt):
