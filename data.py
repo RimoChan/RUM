@@ -33,12 +33,22 @@ def compute_time_ids(original_size, resized_size, crops_coords_top_left):
     return add_time_ids
 
 
-def flux_vae_encode(vae, pixel_values, latents_bn_mean, latents_bn_std) -> torch.Tensor:
-    latent = vae.encode(pixel_values.to(vae.dtype)).latent_dist.mode()
+def flux_vae_encode(vae, pixel_values: torch.Tensor, latents_bn_mean, latents_bn_std) -> torch.Tensor:
+    # pixel_values的shape是BCHW，范围是-1~1。
+    latent = vae.encode(pixel_values.to(device=vae.device, dtype=vae.dtype)).latent_dist.mode()
     latent = Flux2KleinPipeline._patchify_latents(latent)
     latent = (latent - latents_bn_mean) / latents_bn_std
     latent = Flux2KleinPipeline._unpatchify_latents(latent)
     return latent
+
+
+def flux_vae_decode(vae, latent: torch.Tensor, latents_bn_mean, latents_bn_std) -> torch.Tensor:
+    latent = latent.to(vae.device)
+    latent = Flux2KleinPipeline._patchify_latents(latent)
+    latent = latent * latents_bn_std + latents_bn_mean
+    latent = Flux2KleinPipeline._unpatchify_latents(latent)
+    image = vae.decode(latent.to(device=vae.device, dtype=vae.dtype), return_dict=False)[0]
+    return image
 
 
 def collate_fn(examples):
