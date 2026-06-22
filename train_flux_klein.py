@@ -1,8 +1,8 @@
 import os
-import re
 import time
 import copy
 import math
+import queue
 import shutil
 import random
 import pickle
@@ -10,12 +10,16 @@ import logging
 import platform
 import argparse
 import itertools
+import threading
 from pathlib import Path
 
+from PIL import Image
 import numpy as np
 import torch
 import torch.utils.checkpoint
 import torch.nn.functional as F
+import torchvision.transforms.functional
+from torchvision.transforms import InterpolationMode
 import transformers
 from safetensors.torch import load_file
 from accelerate import Accelerator
@@ -24,14 +28,14 @@ from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration
 from tqdm.auto import tqdm
 from transformers import Qwen2TokenizerFast, Qwen3ForCausalLM
 
-import diffusers
+import diffusers.utils.torch_utils
 from diffusers import FlowMatchEulerDiscreteScheduler,  StableDiffusionXLPipeline, Flux2KleinPipeline, AutoencoderKLFlux2
 from diffusers.training_utils import compute_density_for_timestep_sampling, compute_loss_weighting_for_sd3
 from compel import Compel, ReturnedEmbeddingsType
 
-from common import 计时, 哈, cycle, clean, 生成optimizer, 评测pipeline, 评测pipeline人, add_image_jpeg, validation_prompt, validation_prompt_reform, cosine_with_restart_scheduler改, optimizer_to_device
+from common import 计时, 哈, cycle, clean, 生成optimizer, 评测pipeline, 评测pipeline人, add_image_jpeg, validation_prompt, validation_prompt_reform, edit_prompt, cosine_with_restart_scheduler改, optimizer_to_device, downsample_noise
 from common import encode_prompt as encode_prompt_sdxl
-from data import prefetch, 生成dataset, collate_fn
+from data import prefetch, 生成dataset, collate_fn, flux_vae_decode, flux_vae_encode
 from arb import arb
 from 哭 import 哭model
 
@@ -40,6 +44,7 @@ muon.zeropower_via_newtonschulz5 = torch.compile(muon.zeropower_via_newtonschulz
 
 
 logger = get_logger(__name__)
+diffusers.utils.torch_utils.logger.setLevel(logging.WARNING)
 
 
 class 哭Pipeline(Flux2KleinPipeline):
@@ -62,10 +67,25 @@ def log_validation(
     accelerator,
     global_step,
     guidance_scale=5,
+    edit_guidance_scale=9,
 ):
-    images = []
     with torch.inference_mode():
+        if args.edit_rate > 0:
+            for num_inference_steps in [20]:
+                images = []
+                for prompt, seed in edit_prompt:
+                    images.append(pipeline(
+                        prompt=prompt,
+                        image=Image.open("./img/抓人.jpg"),
+                        generator=torch.Generator(device='cpu').manual_seed(seed),
+                        num_inference_steps=num_inference_steps,
+                        guidance_scale=edit_guidance_scale,
+                    ).images[0])
+                for tracker in accelerator.trackers:
+                    if tracker.name == "tensorboard":
+                        add_image_jpeg(tracker.writer, f"编辑-cfg{edit_guidance_scale}-n{num_inference_steps}", np.concatenate([np.asarray(img) for img in images], axis=1), global_step)
         for num_inference_steps in [20]:
+            images = []
             for prompt, seed in validation_prompt:
                 images.append(pipeline(
                     prompt=prompt,
@@ -77,18 +97,16 @@ def log_validation(
                 ).images[0])
             for tracker in accelerator.trackers:
                 if tracker.name == "tensorboard":
-                    concat_image = np.concatenate([np.asarray(img) for img in images], axis=1)
-                    add_image_jpeg(tracker.writer, f"validation-cfg{guidance_scale}-n{num_inference_steps}", concat_image, global_step)
+                    add_image_jpeg(tracker.writer, f"validation-cfg{guidance_scale}-n{num_inference_steps}", np.concatenate([np.asarray(img) for img in images], axis=1), global_step)
         clean()
-        if global_step > 0:
+        if global_step > 1188009:
             pipeline.set_progress_bar_config(disable=True)
-            if args.validation_type == 'human':
+            if 'human' in args.validation_type.split(','):
                 分数 = 评测pipeline人(pipeline, n_iter=args.validation_n_iter, guidance_scale=guidance_scale)
-                前缀 = f'人分数-{args.validation_n_iter}'
-            else:
-                分数 = 评测pipeline(pipeline, n_iter=args.validation_n_iter, guidance_scale=guidance_scale)
-                前缀 = '分数'
-            accelerator.log({f"{前缀}-cfg{guidance_scale}": 分数}, step=global_step)
+                accelerator.log({f"人分数-{args.validation_n_iter}-cfg{guidance_scale}": 分数}, step=global_step)
+            if 'tag' in args.validation_type.split(','):
+                分数 = 评测pipeline(pipeline, n_iter=args.validation_n_iter//2, guidance_scale=guidance_scale)
+                accelerator.log({f"tag分数-{args.validation_n_iter//2}-cfg{guidance_scale}": 分数}, step=global_step)
     del pipeline
     clean()
 
@@ -118,6 +136,23 @@ def 褪色(model, safetensors_path, alpha=0.99):
     return total_diff
 
 
+@torch.no_grad()
+def downsample_latent(vae, latent, latents_bn_mean, latents_bn_std, k):
+    device = latent.device
+    image = flux_vae_decode(vae, latent, latents_bn_mean, latents_bn_std)
+    image = torch.clamp(image, min=-1.0, max=1.0)
+    _, _, W, H = image.shape
+    image = torchvision.transforms.functional.resize(
+        image,
+        size=[W // k, H // k], 
+        interpolation=InterpolationMode.BICUBIC,
+        antialias=True
+    )
+    image = torch.clamp(image, min=-1.0, max=1.0)
+    latent = flux_vae_encode(vae, image, latents_bn_mean, latents_bn_std)
+    return latent.to(device=device)
+
+
 def parse_args(input_args=None):
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
     parser.add_argument(
@@ -129,19 +164,6 @@ def parse_args(input_args=None):
         "--teacher_model_name_or_path",
         type=str,
         required=True,
-    )
-    parser.add_argument(
-        "--revision",
-        type=str,
-        default=None,
-        required=False,
-        help="Revision of pretrained model identifier from huggingface.co/models.",
-    )
-    parser.add_argument(
-        "--variant",
-        type=str,
-        default=None,
-        help="Variant of the model files of the pretrained model identifier from huggingface.co/models, 'e.g.' fp16",
     )
     parser.add_argument(
         "--train_data_dir",
@@ -253,12 +275,6 @@ def parse_args(input_args=None):
         default=0,
     )
     parser.add_argument(
-        "--text_encoder_lr",
-        type=float,
-        default=5e-6,
-        help="Text encoder learning rate to use.",
-    )
-    parser.add_argument(
         "--lr_scheduler",
         type=str,
         default="constant",
@@ -317,8 +333,8 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam and Prodigy optimizers."
     )
-    parser.add_argument("--adam_weight_decay", type=float, default=1e-04)
-    parser.add_argument("--muon_weight_decay", type=float, default=1e-02)
+    parser.add_argument("--adam_weight_decay", type=float, default=0.0)
+    parser.add_argument("--muon_weight_decay", type=float, default=0.0)
 
     parser.add_argument(
         "--adam_epsilon",
@@ -358,17 +374,22 @@ def parse_args(input_args=None):
         type=str,
         default=None,
         choices=["no", "fp16", "bf16"],
-        help=(
-            "Whether to use mixed precision. Choose between fp16 and bf16 (bfloat16). Bf16 requires PyTorch >="
-            " 1.10.and an Nvidia Ampere GPU.  Default to the value of accelerate config of the current system or the"
-            " flag passed with the `accelerate.launch` command. Use this argument to override the accelerate config."
-        ),
     )
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     parser.add_argument(
         "--drop_text_rate",
         type=float,
         default=0.02,
+    )
+    parser.add_argument(
+        "--downsample_rate",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--edit_rate",
+        type=float,
+        default=0.0,
     )
     parser.add_argument(
         "--drop_tag_rate",
@@ -434,11 +455,6 @@ def parse_args(input_args=None):
         "--embedder_2_k",
         type=int,
         default=1,
-    )
-    parser.add_argument(
-        "--reset_nega_noise",
-        action="store_true",
-        default=False,
     )
 
     if input_args is not None:
@@ -541,8 +557,7 @@ def main(args):
 
     assert accelerator.mixed_precision == "bf16", f'{accelerator.mixed_precision}不行，只支持bf16。'
 
-    vae.to(dtype=torch.float32)
-    # transformer.to(accelerator.device, dtype=torch.float32)
+    vae.to(accelerator.device, dtype=torch.float32)
     transformer.to(accelerator.device, dtype=torch.bfloat16)
 
     if args.gradient_checkpointing:
@@ -614,7 +629,7 @@ def main(args):
         f'b{args.train_batch_size}' * (args.train_batch_size > 1) + \
         f'x{args.gradient_accumulation_steps}' * (args.gradient_accumulation_steps > 1) + \
         f'x{world_size}' * (world_size > 1) + \
-        f'-{args.lr_num_cycles}-drop{args.drop_text_rate}&{args.drop_tag_rate}&{args.drop_char_feature_rate}-{args.mixed_precision}-SS{args.sigmas_scale}-n{args.inference_steps}-cfg{args.teacher_cfg}-{args.weighting_scheme}_{args.logit_mean}_{args.logit_std}' + '-TEST'*bool(args.quick_test)
+        f'-{args.lr_num_cycles}-drop{args.drop_text_rate}&{args.drop_tag_rate}&{args.drop_char_feature_rate}-{args.mixed_precision}-SS{args.sigmas_scale}-n{args.inference_steps}-cfg{args.teacher_cfg}-{args.weighting_scheme}_{args.logit_mean}_{args.logit_std}-down{args.downsample_rate}' + '-TEST'*bool(args.quick_test)
     if args.prefetch_n_sample != 1:
         特征 += f'-sp{args.prefetch_n_sample}'
     if args.max_grad_norm != 1:
@@ -630,8 +645,6 @@ def main(args):
     特征 += f'-哭'
     if args.embedder_2_k != 1:
         特征 += f'{args.embedder_2_k}'
-    if args.reset_nega_noise:
-        特征 += f'RN'
 
     if accelerator.is_main_process:
         args_cp = vars(args).copy()
@@ -701,13 +714,13 @@ def main(args):
             sigma = sigma.unsqueeze(-1)
         return sigma
 
-    def batch_n_sample(batch: dict, prefetch_n_sample) -> list[dict]:
+    def batch_n_sample(batch: dict, prefetch_n_sample:int = 1, 训练编辑=False) -> list[dict]:
         a = []
         标记 = random.randint(1000, 9999)
         for _ in range(prefetch_n_sample):
             b = copy.deepcopy(batch)
-            if b['学nega'] and args.reset_nega_noise:
-                b['noise'] = torch.randn(size=b['noise'].size(), dtype=b['noise'].dtype, device=b['noise'].device)
+            if 训练编辑:
+                b['noise'] = torch.randn(size=b['target_x0_sd3'].size(), dtype=b['target_x0_sd3'].dtype, device=b['target_x0_sd3'].device)
             u = compute_density_for_timestep_sampling(
                 weighting_scheme=args.weighting_scheme,
                 batch_size=b['noise'].shape[0],
@@ -723,6 +736,8 @@ def main(args):
             b['sigmas'] = sigmas
             b['noisy_model_input'] = Flux2KleinPipeline._patchify_latents(noisy_model_input)
             b['target_v'] = Flux2KleinPipeline._patchify_latents(b['noise'] - b['target_x0_sd3'])
+            if 训练编辑:
+                b['reference'] = Flux2KleinPipeline._patchify_latents(b['reference'])
             if not args.quick_test:
                 del b['target_x0_sd3'], b['noise']
             b_cpu = {}
@@ -735,15 +750,40 @@ def main(args):
             a.append(b_cpu)
         return a
 
+    def 编源():
+        a = [*Path('S:/RUM_MagicBrush_去水印/').glob('*.pkl')]
+        random.shuffle(a)
+        for i in a:
+            with open(i, 'rb') as f:
+                b = pickle.load(f)
+                yield from batch_n_sample(b, 1, True)
+
     def 超源(it, accelerator):
         if args.prefetch_cache_dir:
+            q = queue.Queue(maxsize=2) 
+            def _reader():
+                while True:
+                    a = [*Path(args.prefetch_cache_dir).glob('*.pkl')]
+                    random.shuffle(a)
+                    for i in a:
+                        with open(i, 'rb') as f:
+                            b = pickle.load(f)
+                            s = b['prompts'][0]
+                            if ('indoors' not in s) and ('outdoors' not in s) and random.random() < 0.5:
+                                continue
+                            q.put(b)
+            threading.Thread(target=_reader, daemon=True).start()
             while True:
-                a = [*Path(args.prefetch_cache_dir).glob('*.pkl')]
-                random.shuffle(a)
-                for i in a:
-                    with open(i, 'rb') as f:
-                        batch = pickle.load(f)
-                    yield from batch_n_sample(batch, 1)
+                batch = q.get(timeout=30)
+                if random.random() < args.downsample_rate:
+                    if random.random() < 0.5:
+                        k = 2
+                    else:
+                        k = 4
+                    with 计时(accelerator, global_step, '下采样'):
+                        batch['noise'] = downsample_noise(batch['noise'], k)
+                        batch['target_x0_sd3'] = downsample_latent(vae, batch['target_x0_sd3'], latents_bn_mean, latents_bn_std, k)
+                yield from batch_n_sample(batch, 1)
         else:
             batch_buffer = []
             while True:
@@ -771,9 +811,18 @@ def main(args):
     if args.train_batch_size > 1:
         train_dataloader_超 = arb(train_dataloader_超, args.train_batch_size)
 
+    train_dataloader_编 = cycle(编源())
+
     transformer.train()
     while global_step <= args.max_train_steps:
-        batch = next(train_dataloader_超)
+        if random.random() < args.edit_rate:
+            训练编辑 = True
+        else:
+            训练编辑 = False
+        if 训练编辑:
+            batch = next(train_dataloader_编)
+        else:
+            batch = next(train_dataloader_超)
         with 计时(accelerator, global_step, 'step'):
             models_to_accumulate = [transformer]
             with accelerator.accumulate(models_to_accumulate):
@@ -782,7 +831,20 @@ def main(args):
                 target = batch['target_v'].to(accelerator.device)
                 sigmas = batch['sigmas'].to(accelerator.device)
                 packed_noisy_model_input = Flux2KleinPipeline._pack_latents(noisy_model_input)
+                if 训练编辑:
+                    orig_input_shape = packed_noisy_model_input.shape
+                    cond_model_input = batch['reference'].to(accelerator.device)
+                    packed_noisy_model_input = torch.cat([
+                        packed_noisy_model_input,
+                        Flux2KleinPipeline._pack_latents(cond_model_input),
+                    ], dim=1)
+
                 model_input_ids = Flux2KleinPipeline._prepare_latent_ids(noisy_model_input).to(device=accelerator.device)
+                if 训练编辑:
+                    orig_input_ids_shape = model_input_ids.shape
+                    cond_model_input_ids = Flux2KleinPipeline._prepare_image_ids([cond_model_input[0:1]]).to(device=cond_model_input.device)
+                    cond_model_input_ids = cond_model_input_ids.expand(cond_model_input.shape[0], -1, -1)
+                    model_input_ids = torch.cat([model_input_ids, cond_model_input_ids], dim=1)
 
                 if accelerator.unwrap_model(transformer).config.guidance_embeds:
                     guidance = torch.full([1], args.guidance_scale, device=accelerator.device)
@@ -790,10 +852,13 @@ def main(args):
                 else:
                     guidance = None
 
-                if batch['学nega']:
-                    超prompt_embeds = torch.cat([batch['prompt_embeds'].to(accelerator.device), F.pad(batch['sdxl_nega_embeds'].to(accelerator.device), (0, 7680 - 2048))], dim=1)
+                if random.random() < 0.2 or 训练编辑:
+                    超prompt_embeds = batch['prompt_embeds'].to(accelerator.device)
                 else:
-                    超prompt_embeds = torch.cat([batch['prompt_embeds'].to(accelerator.device), F.pad(batch['sdxl_prompt_embeds'].to(accelerator.device), (0, 7680 - 2048))], dim=1)
+                    if batch['学nega']:
+                        超prompt_embeds = torch.cat([batch['prompt_embeds'].to(accelerator.device), F.pad(batch['sdxl_nega_embeds'].to(accelerator.device), (0, 7680 - 2048))], dim=1)
+                    else:
+                        超prompt_embeds = torch.cat([batch['prompt_embeds'].to(accelerator.device), F.pad(batch['sdxl_prompt_embeds'].to(accelerator.device), (0, 7680 - 2048))], dim=1)
                 bs, n = 超prompt_embeds.shape[0:2]
                 超text_ids = torch.zeros(bs, n, 4, dtype=torch.long, device=accelerator.device)
                 超text_ids[..., -1] = torch.arange(n, device=accelerator.device)
@@ -807,14 +872,17 @@ def main(args):
                     img_ids=model_input_ids,
                     return_dict=False,
                 )[0]
-                model_pred_v = model_pred_v[:, : packed_noisy_model_input.size(1) :]
+                if 训练编辑:
+                    model_pred_v = model_pred_v[:, : orig_input_shape[1], :]
+                    model_input_ids = model_input_ids[:, : orig_input_ids_shape[1], :]
+                else:
+                    model_pred_v = model_pred_v[:, : packed_noisy_model_input.size(1) :]
                 model_pred_v = Flux2KleinPipeline._unpack_latents_with_ids(model_pred_v, model_input_ids)
 
                 if args.quick_test:
                     model_pred_x0 = model_pred_v * (-sigmas) + noisy_model_input
                     with torch.no_grad():
                         transformer.to('cpu')
-                        vae.to(accelerator.device)
                         存档文件夹 = f'{args.output_dir}/quick_test_image_cfg{args.teacher_cfg}_n{args.inference_steps}'
                         os.makedirs(存档文件夹, exist_ok=True)
                         for latent, 名字, use_patchify in [(model_pred_x0, '学生pred_x0', False), (noisy_model_input, 'xt', False), (batch['target_x0_sd3'], '教师x0', True)]:
@@ -824,7 +892,6 @@ def main(args):
                             image = vae.decode(Flux2KleinPipeline._unpatchify_latents(latent).to(device=vae.device, dtype=vae.dtype), return_dict=False)[0]
                             image = text_encoding_pipeline.image_processor.postprocess(image, output_type='pil')[0]
                             image.save(f'{存档文件夹}/step{global_step}_{int(timesteps[0])}_{名字}.png')
-                        vae.to('cpu')
                         transformer.to(accelerator.device)
 
                 weighting = compute_loss_weighting_for_sd3(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
@@ -853,7 +920,6 @@ def main(args):
             with 计时(accelerator, global_step, 'validation'):
                 optimizer_to_device(optimizer, 'cpu')
                 text_encoder.to(accelerator.device)
-                vae.to(accelerator.device)
                 transformer.to(accelerator.device)
 
                 for i in [教师pipeline.text_encoder, 教师pipeline.text_encoder_2]:
@@ -876,7 +942,6 @@ def main(args):
                     i.to('cpu')
 
                 transformer.to(accelerator.device)
-                vae.to('cpu')
                 text_encoder.to('cpu')
                 optimizer_to_device(optimizer, accelerator.device)
                 clean()

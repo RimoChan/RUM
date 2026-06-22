@@ -20,16 +20,21 @@ from data import flux_vae_encode, compute_text_embeddings
 from common import 计时, clean
 
 
-def parquet_data_iterator(file_path, min_size=256, max_size=1087):
+from torchvision.transforms.functional import pil_to_tensor
+
+
+def parquet_data_iterator(file_path, min_size=256, max_size=1087, tolerance=50.0):
     columns_to_read = ['img_id', 'turn_index', 'source_img', 'instruction', 'target_img']
 
     parquet_file = pq.ParquetFile(file_path)
 
-    def bytes_to_pil(img_data: dict, size: int):
-        img = Image.open(io.BytesIO(img_data['bytes'])).convert("RGB")
+    def decode_to_pil(img_data: dict):
+        return Image.open(io.BytesIO(img_data['bytes'])).convert("RGB")
+
+    def resize_img(img: Image.Image, size: int):
         width, height = img.size
         short_edge = min(width, height)
-        
+
         if short_edge != size:
             scale = size / short_edge
             new_width = int(round(width * scale))
@@ -37,19 +42,53 @@ def parquet_data_iterator(file_path, min_size=256, max_size=1087):
             img = img.resize((new_width, new_height), resample=Image.Resampling.LANCZOS)
         return img
 
+    计数 = 0
     for batch in parquet_file.iter_batches(batch_size=100, columns=columns_to_read):
         batch_dict = batch.to_pydict()
         num_rows = len(batch_dict['img_id'])
         for i in range(num_rows):
             if batch_dict['turn_index'][i] > 1:
                 continue
+            计数 += 1
+            source_img = decode_to_pil(batch_dict['source_img'][i])
+            target_img = decode_to_pil(batch_dict['target_img'][i])
+
+            s_width, s_height = source_img.size
+            t_width, t_height = target_img.size
+
+            chk_w, chk_h = 90, 26
+            wm_w, wm_h = 80, 16
+
+            src_chk_w = int(chk_w * (s_width / t_width))
+            src_chk_h = int(chk_h * (s_height / t_height))
+
+            target_chk_patch = target_img.crop((t_width - chk_w, t_height - chk_h, t_width, t_height))
+            source_chk_patch = source_img.crop((s_width - src_chk_w, s_height - src_chk_h, s_width, s_height))
+
+            source_chk_patch = source_chk_patch.resize((chk_w, chk_h), resample=Image.Resampling.LANCZOS)
+
+            t_tensor = pil_to_tensor(target_chk_patch).float()
+            s_tensor = pil_to_tensor(source_chk_patch).float()
+
+            mask = torch.ones((3, chk_h, chk_w), dtype=torch.float32)
+            mask[:, chk_h - wm_h:, chk_w - wm_w:] = 0.0  
+
+            diff = torch.abs(t_tensor - s_tensor) * mask
+            valid_pixels = torch.sum(mask)
+            mae = torch.sum(diff) / valid_pixels
+
+            if mae.item() > tolerance:
+                print(f"{Path(file_path).name}_{计数-1} 背景不一致，跳过！ (MAE: {mae.item():.2f} > {tolerance})")
+                continue
+
+            source_wm_patch = source_chk_patch.crop((chk_w - wm_w, chk_h - wm_h, chk_w, chk_h))
+            target_img.paste(source_wm_patch, (t_width - wm_w, t_height - wm_h))
             size = random.randint(min_size, max_size) // 64 * 64
             yield {
                 'instruction': batch_dict['instruction'][i],
-                'source_img': bytes_to_pil(batch_dict['source_img'][i], size),
-                'target_img': bytes_to_pil(batch_dict['target_img'][i], size),
+                'source_img': resize_img(source_img, size),
+                'target_img': resize_img(target_img, size),
             }
-
 
 
 def parquet_data_iterator_大(all_parquet):
@@ -103,7 +142,7 @@ def _ember(magic_brush_data_dir: str, output_dir: str, pretrained_model_name_or_
                 clean()
 
 
-# python data_edit.py --magic_brush_data_dir=S:/MagicBrush/data --output_dir=S:\RUM_MagicBrush --pretrained_model_name_or_path="C:/Users/Administrator/Desktop/FLUX.2-klein-base-4B"
+# python data_edit.py --magic_brush_data_dir=S:/MagicBrush/data --output_dir=S:\RUM_MagicBrush_去水印 --pretrained_model_name_or_path="C:/Users/Administrator/Desktop/FLUX.2-klein-base-4B"
 
 
 if __name__ == '__main__':

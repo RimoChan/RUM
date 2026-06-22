@@ -235,6 +235,14 @@ def cosine_with_restart_scheduler改(
     )
 
 
+def downsample_noise(x: torch.Tensor, k: int) -> torch.Tensor:
+    b, c, n, m = x.shape
+    assert n % k == 0 and m % k == 0
+    x_reshaped = x.view(b, c, n // k, k, m // k, k)
+    x_scaled = x_reshaped.sum(dim=(3, 5)) / k
+    return x_scaled
+
+
 def 看看显存(device='cuda:0'):
     tensor_count = 0
     seen_storage_ptrs = set()
@@ -282,6 +290,16 @@ validation_prompt_reform = [
     ('1girl, character momoi (blue archive), typing on keyboard, computer, sitting, angry, indoors, artist fuzichoco, newest', 4),
     ('1girl, character yuuka (blue archive), holding cup, sitting, indoors, artist kantoku, newest', 5),
     ('1girl, character azusa (blue archive), eating pizza, sitting, indoors, artist chen bin', 6),
+]
+
+edit_prompt = [
+    ('将背景改为海滩', 1),
+    ('add twintails', 2),
+    ('把外套改为蓝色', 3),
+    ('1girl, kisaki (blue archive), eating baozi, sitting, indoors, mignon', 4),
+    ('let, 1girl, fuzichoco', 5),
+    ('add choker', 6),
+    ('school uniform, serafuku', 7),
 ]
 
 

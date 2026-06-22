@@ -117,9 +117,11 @@ class 哭model(Flux2Transformer2DModel):
         # 2. Input projection for image (hidden_states) and conditioning text (encoder_hidden_states)
         hidden_states = self.x_embedder(hidden_states)
 
-        assert encoder_hidden_states.shape[1] > 200
-        encoder_hidden_states_1, encoder_hidden_states_2 = encoder_hidden_states[:, :200], encoder_hidden_states[:, 200:, :2048]
-        encoder_hidden_states = torch.cat([self.context_embedder(encoder_hidden_states_1), self.context_embedder_2(encoder_hidden_states_2)], dim=1)
+        if encoder_hidden_states.shape[1] > 200:
+            encoder_hidden_states_1, encoder_hidden_states_2 = encoder_hidden_states[:, :200], encoder_hidden_states[:, 200:, :2048]
+            encoder_hidden_states = torch.cat([self.context_embedder(encoder_hidden_states_1), self.context_embedder_2(encoder_hidden_states_2)], dim=1)
+        else:
+            encoder_hidden_states = self.context_embedder(encoder_hidden_states)
 
         # 3. Calculate RoPE embeddings from image and text tokens
         # NOTE: the below logic means that we can't support batched inference with images of different resolutions or
