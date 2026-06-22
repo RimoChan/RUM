@@ -17,4 +17,4 @@ compel==2.0.3
 sentencepiece==0.2.1
 tensorboard==2.20.0
 git+https://github.com/RimoChan/waifu-sensor
-git+https://github.com/KellerJordan/Muon
+git+https://github.com/RimoChan/Muon
