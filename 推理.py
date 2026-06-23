@@ -1,15 +1,19 @@
+import os
 import torch
 import torch.nn.functional as F
+from PIL import Image
 from safetensors.torch import load_file
 from diffusers import StableDiffusionXLPipeline, Flux2KleinPipeline
 
 from 哭 import 哭model
 
-# 原 = "R:/models/FLUX.2-klein-base-4B"
-原 = "C:/Users/Administrator/Desktop/FLUX.2-klein-base-4B"
-新 = r"R:\RUM-FLUX.2-klein-4B-preview\model-checkpoint-1158000.safetensors"
+原 = "R:/models/FLUX.2-klein-base-4B"
+新 = "R:/RUM-FLUX.2-klein-4B-preview/model-checkpoint-1202000.safetensors"
 
 sdxl = "C:/Users/Administrator/Desktop/models/waiNSFWIllustrious_v140.safetensors"
+
+
+os.makedirs('测试输出', exist_ok=True)
 
 
 class 哭Pipeline(Flux2KleinPipeline):
@@ -35,7 +39,8 @@ pipeline = 哭Pipeline.from_pretrained(原, transformer=transformer, torch_dtype
 pipeline.to('cuda')
 
 教师pipeline = StableDiffusionXLPipeline.from_single_file(sdxl, torch_dtype=torch.float16)
-
+教师pipeline.text_encoder.to('cuda')
+教师pipeline.text_encoder_2.to('cuda')
 
 validation_prompt = [
     ('1girl, kisaki (blue archive), holding baozi, eating, indoors, momoko (momopoco)', 1),
@@ -43,7 +48,6 @@ validation_prompt = [
     ('1girl, yuuka (blue archive), holding cup, white jacket, black jacket, blue necktie, indoors, fuzichoco', 3),
     ('1girl, azusa (blue archive), holding pizza, eating, indoors, chen bin', 4),
 ]
-
 
 for width in [960]:
     for height in [1152]:
@@ -57,4 +61,25 @@ for width in [960]:
                         guidance_scale=guidance_scale,
                         width=width,
                         height=height,
-                    ).images[0].save(f'output_{i}_cfg{guidance_scale}_seed{seed}_n{num_inference_steps}_{width}×{height}.png')
+                    ).images[0].save(f'测试输出/output_{i}_cfg{guidance_scale}_seed{seed}_n{num_inference_steps}_{width}×{height}.png')
+
+
+edit_prompt = [
+    ('将服装改为school uniform, short sleeves', 1),
+    ('add twintails', 2),
+    ('1girl, remove shoes, bare foot', 3),
+    ('1girl, change background to beach', 4),
+    ('add choker', 6),
+    ('改为1girl, fuzichoco', 5),
+]
+
+for guidance_scale in [9]:
+    for num_inference_steps in [20]:
+        for i, (prompt, seed) in enumerate(edit_prompt):
+            pipeline(
+                prompt=prompt,
+                image=Image.open("./img/抓人.jpg"),
+                generator=torch.Generator(device='cpu').manual_seed(seed),
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+            ).images[0].save(f'测试输出/编辑_output_{i}_cfg{guidance_scale}_seed{seed}_n{num_inference_steps}.png')

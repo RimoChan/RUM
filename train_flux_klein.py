@@ -382,6 +382,11 @@ def parse_args(input_args=None):
         default=0.02,
     )
     parser.add_argument(
+        "--drop_sdxl_emb_rate",
+        type=float,
+        default=0,
+    )
+    parser.add_argument(
         "--downsample_rate",
         type=float,
         default=0.0,
@@ -751,12 +756,13 @@ def main(args):
         return a
 
     def 编源():
-        a = [*Path('S:/RUM_MagicBrush_去水印/').glob('*.pkl')]
-        random.shuffle(a)
-        for i in a:
-            with open(i, 'rb') as f:
-                b = pickle.load(f)
-                yield from batch_n_sample(b, 1, True)
+        while True:
+            a = [*Path('S:/RUM_MagicBrush_去水印/').glob('*.pkl')]
+            random.shuffle(a)
+            for i in a:
+                with open(i, 'rb') as f:
+                    b = pickle.load(f)
+                    yield from batch_n_sample(b, 1, True)
 
     def 超源(it, accelerator):
         if args.prefetch_cache_dir:
@@ -811,7 +817,7 @@ def main(args):
     if args.train_batch_size > 1:
         train_dataloader_超 = arb(train_dataloader_超, args.train_batch_size)
 
-    train_dataloader_编 = cycle(编源())
+    train_dataloader_编 = 编源()
 
     transformer.train()
     while global_step <= args.max_train_steps:
@@ -852,7 +858,7 @@ def main(args):
                 else:
                     guidance = None
 
-                if random.random() < 0.2 or 训练编辑:
+                if random.random() < args.drop_sdxl_emb_rate or 训练编辑:
                     超prompt_embeds = batch['prompt_embeds'].to(accelerator.device)
                 else:
                     if batch['学nega']:
