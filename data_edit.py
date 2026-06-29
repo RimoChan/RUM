@@ -16,6 +16,7 @@ from diffusers import Flux2KleinPipeline
 import torchvision.transforms as transforms
 from transformers import Qwen2TokenizerFast, Qwen3ForCausalLM
 
+from common import encode_prompt as encode_prompt_sdxl
 from data import flux_vae_encode, compute_text_embeddings
 from common import 计时, clean
 
@@ -97,7 +98,10 @@ def parquet_data_iterator_大(all_parquet):
             yield i, d, p.name
 
 
-def _ember(magic_brush_data_dir: str, output_dir: str, pretrained_model_name_or_path: str, ):
+def _ember(magic_brush_data_dir: str, output_dir: str, pretrained_model_name_or_path: str, teacher_model_name_or_path: str):
+    from diffusers import StableDiffusionXLPipeline
+    from compel import Compel, ReturnedEmbeddingsType
+
     os.makedirs(output_dir, exist_ok=True)
 
     vae = AutoencoderKLFlux2.from_pretrained(
@@ -107,6 +111,16 @@ def _ember(magic_brush_data_dir: str, output_dir: str, pretrained_model_name_or_
     vae.to('cuda:0')
     latents_bn_mean = vae.bn.running_mean.view(1, -1, 1, 1).to('cuda:0')
     latents_bn_std = torch.sqrt(vae.bn.running_var.view(1, -1, 1, 1) + vae.config.batch_norm_eps).to('cuda:0')
+
+    教师pipeline = StableDiffusionXLPipeline.from_single_file(teacher_model_name_or_path, torch_dtype=torch.float16)
+    教师pipeline的compel = Compel(truncate_long_prompts=False, tokenizer=[教师pipeline.tokenizer, 教师pipeline.tokenizer_2], text_encoder=[教师pipeline.text_encoder, 教师pipeline.text_encoder_2],  returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED, requires_pooled=[False, True])
+    教师pipeline.vae.to(dtype=torch.float32)
+    教师pipeline.unet.requires_grad_(False)
+    教师pipeline.vae.requires_grad_(False)
+    教师pipeline.text_encoder.requires_grad_(False)
+    教师pipeline.text_encoder_2.requires_grad_(False)
+    教师pipeline.text_encoder.to('cuda:0')
+    教师pipeline.text_encoder_2.to('cuda:0')
 
     tokenizer = Qwen2TokenizerFast.from_pretrained(pretrained_model_name_or_path, subfolder="tokenizer")
     text_encoder = Qwen3ForCausalLM.from_pretrained(pretrained_model_name_or_path, subfolder="text_encoder").to('cuda:0')
@@ -136,13 +150,14 @@ def _ember(magic_brush_data_dir: str, output_dir: str, pretrained_model_name_or_
             d['target_x0_sd3'] = flux_vae_encode(vae, pil转tensor(d.pop('target_img')).unsqueeze(0), latents_bn_mean, latents_bn_std)
             d['prompt_embeds'], d['text_ids'] = [i.cpu() for i in compute_text_embeddings(d['instruction'], text_encoding_pipeline, 200, [10, 20, 30])]
             d['prompt_embeds'] = d['prompt_embeds'].to(torch.bfloat16)
+            d['sdxl_prompt_embeds'], d['sdxl_pooled_prompt_embeds'] = [i.cpu() for i in encode_prompt_sdxl([d['instruction']], 教师pipeline的compel)]
             with open(f'{output_dir}/{p_name}_{i}.pkl', 'wb') as f:
                 pickle.dump(d, f)
             if i % 10 == 0:
                 clean()
 
 
-# python data_edit.py --magic_brush_data_dir=S:/MagicBrush/data --output_dir=S:\RUM_MagicBrush_去水印 --pretrained_model_name_or_path="C:/Users/Administrator/Desktop/FLUX.2-klein-base-4B"
+# python data_edit.py --magic_brush_data_dir=S:/MagicBrush/data --output_dir=S:\RUM_MagicBrush_超 --pretrained_model_name_or_path="C:/Users/Administrator/Desktop/FLUX.2-klein-base-4B" --teacher_model_name_or_path="C:/Users/Administrator/Desktop/models/waiNSFWIllustrious_v140.safetensors"
 
 
 if __name__ == '__main__':
