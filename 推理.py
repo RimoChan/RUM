@@ -8,7 +8,7 @@ from diffusers import StableDiffusionXLPipeline, Flux2KleinPipeline
 from 哭 import 哭model
 
 原 = "R:/models/FLUX.2-klein-base-4B"
-新 = "R:/RUM-FLUX.2-klein-4B-preview/model-checkpoint-1296000.safetensors"
+新 = "R:/RUM-FLUX.2-klein-4B-preview/model-checkpoint-1550000.safetensors"
 
 sdxl = "C:/Users/Administrator/Desktop/models/waiNSFWIllustrious_v140.safetensors"
 
@@ -43,16 +43,16 @@ pipeline.to('cuda')
 教师pipeline.text_encoder_2.to('cuda')
 
 validation_prompt = [
-    ('1girl, kisaki (blue archive), holding baozi, eating, indoors, momoko (momopoco)', 1),
-    ('1girl, momoi (blue archive), typing on keyboard, computer, blue necktie, open coat, multicolored coat, angry, indoors, ameto yuki', 2),
-    ('1girl, yuuka (blue archive), holding cup, white jacket, black jacket, blue necktie, indoors, fuzichoco', 3),
-    ('1girl, azusa (blue archive), holding pizza, eating, indoors, chen bin', 4),
+    ('1girl, kisaki (blue archive), holding baozi, eating, table, indoors, looking down, momoko (momopoco)', 1),
+    ('1girl, momoi (blue archive), typing on keyboard, computer, blue necktie, pink shoulder white sleeve, white coat, white shirt, v-shaped eyebrows, sitting on gaming chair, indoors, starshadowmagician', 2),
+    ('1girl, yuuka (blue archive), holding cup, black jacket, suit, blue necktie, hand twirling hair, indoors, fuzichoco', 3),
+    ('1girl, azusa (blue archive), holding ice cream, eating, outdoors, shopping street, black sailor collar, white shirt, light smile, fingers, huwari (dnwls3010)', 4),
 ]
 
 for width in [960]:
     for height in [1152]:
         for guidance_scale in [5]:
-            for num_inference_steps in [20]:
+            for num_inference_steps in [30]:
                 for i, (prompt, seed) in enumerate(validation_prompt):
                     pipeline(
                         prompt=prompt,
@@ -65,22 +65,21 @@ for width in [960]:
 
 
 edit_prompt = [
-    ('style to fuzichoco', ''),
-    ('1girl, hakurei reimu, black hair', ''),
-    ('white hair', 'short hair'),
-    ('wedding dress, hold own skirt', ''),
-    ('long hair', ''),
-    ('beach', ''),
+    ('change style to fuzichoco', '', 5),
+    ('change to 1girl, hakurei reimu, black hair, remove twintails', '', 5),
+    ('white hair', 'short hair', 1),
+    ('change to long dress, wedding dress, holding own dress, strapless', '', 5),
+    ('change to long hair', '', 5),
+    ('beach, outdoors', '', 5),
 ]
 
-for guidance_scale in [5]:
-    for num_inference_steps in [10]:
-        for i, (prompt, negative_prompt) in enumerate(edit_prompt):
-            pipeline(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                image=Image.open("./img/靓仔.png"),
-                generator=torch.Generator(device='cpu').manual_seed(1),
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-            ).images[0].save(f'测试输出/编辑_output_{i}_cfg{guidance_scale}_n{num_inference_steps}.png')
+for num_inference_steps in [10]:
+    for i, (prompt, negative_prompt, guidance_scale) in enumerate(edit_prompt):
+        pipeline(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            image=Image.open("./img/靓仔.png"),
+            generator=torch.Generator(device='cpu').manual_seed(1),
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+        ).images[0].save(f'测试输出/编辑_output_{i}_cfg{guidance_scale}_n{num_inference_steps}.png')
