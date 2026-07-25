@@ -7,6 +7,7 @@ import time
 import random
 import hashlib
 import contextlib
+from itertools import islice
 from typing import Optional
 
 import torch
@@ -55,6 +56,14 @@ def compute_time_ids(original_size, resized_size, crops_coords_top_left):
     add_time_ids = list(original_size + crops_coords_top_left + target_size)
     add_time_ids = torch.tensor([add_time_ids])
     return add_time_ids
+
+
+def batched(iterable, n, *, strict=False):
+    iterator = iter(iterable)
+    while batch := tuple(islice(iterator, n)):
+        if strict and len(batch) != n:
+            raise ValueError('batched(): incomplete batch')
+        yield batch
 
 
 def is_muon(name, param):
@@ -130,34 +139,40 @@ def optimizer_to_device(optimizer, device):
                 state[k] = v.to(device)
 
 
-def 评测pipeline人(pipe, n_iter, guidance_scale=7):
+def 评测pipeline人(pipe, n_iter, guidance_scale=7, 人数=1):
     from imgutils.tagging import get_wd14_tags
     人频率1 = {k: v for k, v in json.loads(open('./人频率6000000~7000000.json').read()).items() if v > 24*1.3}
     人频率2 = {k: v for k, v in json.loads(open('./人频率1~6400000.json').read()).items() if v > 64*1.5}
     要测的人 = sorted(set(人频率1) | set(人频率2))
     记录 = []
-    for index, 人 in enumerate(tqdm(要测的人[:n_iter], ncols=70, desc='评测人')):
-        人 = 人.strip().replace('_', ' ')
+    要测的人batched = [*batched(要测的人, 人数)]
+    for index, 人组 in enumerate(tqdm(要测的人batched[:n_iter], ncols=70, desc='评测人')):
+        人组 = [i.strip().replace('_', ' ') for i in 人组]
         seed = index*100
+        if 人数 == 1:
+            tags = ['1 girl'] + 人组
+        else:
+            tags = [f'{人数}girls'] + 人组
         image = pipe(
-            prompt=f'1 girl, {人}',
+            prompt=', '.join(tags),
             generator=torch.Generator(device='cpu').manual_seed(seed),
             num_inference_steps=20,
             guidance_scale=guidance_scale,
-            width=640,
+            width=512 + 128*人数,
             height=768,
         ).images[0]
         预测 = get_wd14_tags(image, character_threshold=0.3)[2]
         记录.append({
             '预测': 预测,
-            '人': 人,
+            '人组': 人组,
             'seed': seed,
         })
     好 = 0
     for d in 记录:
-        t = d['人'].replace(' ', '_')
-        好 += d['预测'].get(t, 0)
-    return 好 / len(记录)
+        for 人 in d['人组']:
+            t = 人.replace(' ', '_')
+            好 += d['预测'].get(t, 0)
+    return 好 / len(记录) / 人数
 
 
 def 评测pipeline(pipe, n_iter, tags_seed=0, random_seed=0, guidance_scale=7):
@@ -297,7 +312,7 @@ edit_prompt = [
     ('add twintails', 2),
     ('把外套改为蓝色', 3),
     ('1girl, kisaki (blue archive), eating baozi, sitting, indoors, mignon', 4),
-    ('let, 1girl, fuzichoco', 5),
+    ('change style to fuzichoco', 5),
     ('add choker', 6),
     ('school uniform, serafuku', 7),
 ]

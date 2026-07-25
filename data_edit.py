@@ -24,7 +24,7 @@ from common import 计时, clean
 from torchvision.transforms.functional import pil_to_tensor
 
 
-def parquet_data_iterator(file_path, min_size=256, max_size=1087, tolerance=50.0):
+def parquet_data_iterator(file_path, min_size=256, max_size=1183, tolerance=50.0):
     columns_to_read = ['img_id', 'turn_index', 'source_img', 'instruction', 'target_img']
 
     parquet_file = pq.ParquetFile(file_path)
@@ -84,7 +84,7 @@ def parquet_data_iterator(file_path, min_size=256, max_size=1087, tolerance=50.0
 
             source_wm_patch = source_chk_patch.crop((chk_w - wm_w, chk_h - wm_h, chk_w, chk_h))
             target_img.paste(source_wm_patch, (t_width - wm_w, t_height - wm_h))
-            size = random.randint(min_size, max_size) // 64 * 64
+            size = random.randint(min_size, max_size) // 32 * 32
             yield {
                 'instruction': batch_dict['instruction'][i],
                 'source_img': resize_img(source_img, size),
@@ -142,22 +142,22 @@ def _ember(magic_brush_data_dir: str, output_dir: str, pretrained_model_name_or_
     print(vae.device, text_encoder.device)
 
     with torch.inference_mode():
-        all_parquet = Path(magic_brush_data_dir).glob('*.parquet')
-        for i, d, p_name in parquet_data_iterator_大(all_parquet):
-            if os.path.exists(f'{output_dir}/{p_name}_{i}.pkl'):
-                continue
-            d['reference'] = flux_vae_encode(vae, pil转tensor(d.pop('source_img')).unsqueeze(0), latents_bn_mean, latents_bn_std)
-            d['target_x0_sd3'] = flux_vae_encode(vae, pil转tensor(d.pop('target_img')).unsqueeze(0), latents_bn_mean, latents_bn_std)
-            d['prompt_embeds'], d['text_ids'] = [i.cpu() for i in compute_text_embeddings(d['instruction'], text_encoding_pipeline, 200, [10, 20, 30])]
-            d['prompt_embeds'] = d['prompt_embeds'].to(torch.bfloat16)
-            d['sdxl_prompt_embeds'], d['sdxl_pooled_prompt_embeds'] = [i.cpu() for i in encode_prompt_sdxl([d['instruction']], 教师pipeline的compel)]
-            with open(f'{output_dir}/{p_name}_{i}.pkl', 'wb') as f:
-                pickle.dump(d, f)
-            if i % 10 == 0:
-                clean()
+        for ep in [0, 1, 2]:
+            all_parquet = Path(magic_brush_data_dir).glob('*.parquet')
+            for i, d, p_name in parquet_data_iterator_大(all_parquet):
+                输出路径 = f'{output_dir}/ep{ep}_{p_name}_{i}.pkl'
+                if os.path.exists(输出路径):
+                    continue
+                d['reference'] = flux_vae_encode(vae, pil转tensor(d.pop('source_img')).unsqueeze(0), latents_bn_mean, latents_bn_std)
+                d['target_x0_sd3'] = flux_vae_encode(vae, pil转tensor(d.pop('target_img')).unsqueeze(0), latents_bn_mean, latents_bn_std)
+                d['prompt_embeds'], d['text_ids'] = [i.cpu() for i in compute_text_embeddings(d['instruction'], text_encoding_pipeline, 200, [10, 20, 30])]
+                d['prompt_embeds'] = d['prompt_embeds'].to(torch.bfloat16)
+                d['sdxl_prompt_embeds'], d['sdxl_pooled_prompt_embeds'] = [i.cpu() for i in encode_prompt_sdxl([d['instruction']], 教师pipeline的compel)]
+                with open(输出路径, 'wb') as f:
+                    pickle.dump(d, f)
+                if i % 10 == 0:
+                    clean()
 
-
-# python data_edit.py --magic_brush_data_dir=S:/MagicBrush/data --output_dir=S:\RUM_MagicBrush_超 --pretrained_model_name_or_path="C:/Users/Administrator/Desktop/FLUX.2-klein-base-4B" --teacher_model_name_or_path="C:/Users/Administrator/Desktop/models/waiNSFWIllustrious_v140.safetensors"
 
 
 if __name__ == '__main__':

@@ -1,6 +1,8 @@
 import os
 import random
-import pickle
+
+os.environ['PYTORCH_ALLOC_CONF'] = 'backend:cudaMallocAsync,expandable_segments:True'
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'backend:cudaMallocAsync,expandable_segments:True'
 
 from tqdm import tqdm
 import torch
@@ -87,7 +89,7 @@ def 生成dataset(accelerator, train_data_dir, drop_tag_rate, drop_char_feature_
 
 def prefetch(it, accelerator, global_step, reform_prompt, prefetch_steps, drop_text_rate, teacher_cfg, inference_steps, text_encoder, 教师pipeline, text_encoding_pipeline, 教师pipeline的compel, vae, latents_bn_mean, latents_bn_std, max_sequence_length, text_encoder_out_layers, device) -> list[dict]:
     prefetch进度条 = tqdm(desc='prefetch', total=prefetch_steps)
-    dpm_scheduler = DPMSolverMultistepScheduler.from_config(教师pipeline.scheduler.config)
+    教师pipeline.scheduler = DPMSolverMultistepScheduler.from_config(教师pipeline.scheduler.config)
     batch_buffer = []
     with torch.no_grad():
         teacher_nega_prompt_embeds, teacher_nega_pooled_prompt_embeds = [i.cpu() for i in encode_prompt_sdxl([''], 教师pipeline的compel)]
@@ -145,43 +147,33 @@ def prefetch(it, accelerator, global_step, reform_prompt, prefetch_steps, drop_t
 
                 assert teacher_cfg > 1
                 to = dict(device=教师pipeline.unet.device, dtype=教师pipeline.unet.dtype)
-                add_time_ids = torch.cat([compute_time_ids(s, r, c) for s, r, c in zip(batch['original_sizes'], batch['resized_sizes'], batch['crop_top_lefts'])])
-                zwei_add_time_ids = torch.cat([add_time_ids, add_time_ids], dim=0).to(**to)
                 cond_prompt_embeds = batch['sdxl_prompt_embeds']
                 uncond_prompt_embeds = teacher_nega_prompt_embeds
                 if uncond_prompt_embeds.shape[1] < cond_prompt_embeds.shape[1]:
                     uncond_prompt_embeds = F.pad(uncond_prompt_embeds, (0, 0, 0, cond_prompt_embeds.shape[1] - uncond_prompt_embeds.shape[1]))
-                zwei_prompt_embeds = torch.cat([uncond_prompt_embeds, cond_prompt_embeds], dim=0).to(**to)
-                zwei_pooled_prompt_embeds = torch.cat([teacher_nega_pooled_prompt_embeds, batch['sdxl_pooled_prompt_embeds']], dim=0).to(**to)
                 latents = noise小.to(device=教师pipeline.unet.device, dtype=torch.float32)
-                latents = latents * dpm_scheduler.init_noise_sigma
-                dpm_scheduler.set_timesteps(inference_steps, device=教师pipeline.unet.device)
-                for i, t in enumerate(dpm_scheduler.timesteps):
-                    latent_model_input = torch.cat([latents, latents], dim=0)
-                    latent_model_input = dpm_scheduler.scale_model_input(latent_model_input, t)
-                    with 计时(accelerator, global_step, 'unet'):
-                        batched_pred = 教师pipeline.unet(
-                            sample=latent_model_input.to(**to),
-                            timestep=t,
-                            encoder_hidden_states=zwei_prompt_embeds,
-                            added_cond_kwargs={'time_ids': zwei_add_time_ids, 'text_embeds': zwei_pooled_prompt_embeds},
-                            return_dict=False,
-                        )[0]
-                        batched_pred = batched_pred.to(torch.float32)
-                        教师pred_uncond, 教师pred_cond = batched_pred.chunk(2, dim=0)
-                        noise_pred = 教师pred_uncond + teacher_cfg * (教师pred_cond - 教师pred_uncond)
-                        latents = dpm_scheduler.step(noise_pred, t, latents, return_dict=False)[0]
-                教师pred_x0 = latents.detach().clone()
+
+                教师pred_x0 = 教师pipeline(
+                    latents=latents.to(**to),
+                    prompt_embeds=cond_prompt_embeds,
+                    pooled_prompt_embeds=batch['sdxl_pooled_prompt_embeds'],
+                    negative_prompt_embeds=uncond_prompt_embeds,
+                    negative_pooled_prompt_embeds=teacher_nega_pooled_prompt_embeds,
+                    num_inference_steps=inference_steps,
+                    guidance_scale=teacher_cfg,
+                    output_type='latent'
+                ).images
+
                 latents_to_decode = 教师pred_x0 / 教师pipeline.vae.config.scaling_factor
                 latents_to_decode = latents_to_decode.to(dtype=教师pipeline.vae.dtype)
                 image_pixels = 教师pipeline.vae.decode(latents_to_decode, return_dict=False)[0]
-
                 image_pixels = torch.clamp(image_pixels, min=-1.0, max=1.0)
+
                 # batch['test_image_pixels'] = image_pixels.cpu()
                 target_x0_sd3 = flux_vae_encode(vae, image_pixels, latents_bn_mean, latents_bn_std)
                 batch['noise'] = noise.cpu()
                 batch['target_x0_sd3'] = target_x0_sd3.cpu()
-            del latents, 教师pred_x0, latents_to_decode, image_pixels, noise小, noise, zwei_prompt_embeds, zwei_pooled_prompt_embeds, zwei_add_time_ids
+            del latents, 教师pred_x0, latents_to_decode, image_pixels, noise小, noise
             for i in [vae, 教师pipeline.vae, 教师pipeline.unet]:
                 i.to('cpu')
 
@@ -193,9 +185,6 @@ def prefetch(it, accelerator, global_step, reform_prompt, prefetch_steps, drop_t
 
     return batch_buffer
 
-
-# python data.py --all_ep=1002,1003 --train_data_dir=X:/image_balance大_2024 --pretrained_model_name_or_path="R:/models/FLUX.2-klein-base-4B" --teacher_model_name_or_path="S:/Stable-diffusion-models/Stable-diffusion/waiNSFWIllustrious_v140.safetensors" --output_dir="R:/RUM缓存_谨慎" --inference_steps=25 --prefetch_steps=200 --学人rate=0.4
-# python data.py --all_ep=2003,2004 --train_data_dir=X:/image_balance大_2024 --pretrained_model_name_or_path="C:/Users/Administrator/Desktop/FLUX.2-klein-base-4B" --teacher_model_name_or_path="C:/Users/Administrator/Desktop/models/waiNSFWIllustrious_v140.safetensors" --output_dir="R:/RUM缓存_谨慎" --inference_steps=25 --prefetch_steps=200 --学人rate=0.2
 
 
 def _ember(all_ep, train_data_dir, pretrained_model_name_or_path, teacher_model_name_or_path, output_dir, min_size=640, max_size=1280, 学人rate=0.5, prefetch_steps=200, inference_steps=25, teacher_cfg=7, seed=None):
@@ -237,6 +226,7 @@ def _ember(all_ep, train_data_dir, pretrained_model_name_or_path, teacher_model_
     latents_bn_mean = vae.bn.running_mean.view(1, -1, 1, 1).to('cuda:0')
     latents_bn_std = torch.sqrt(vae.bn.running_var.view(1, -1, 1, 1) + vae.config.batch_norm_eps).to('cuda:0')
 
+    StableDiffusionXLPipeline._execution_device = torch.device('cuda:0')
     教师pipeline = StableDiffusionXLPipeline.from_single_file(teacher_model_name_or_path, torch_dtype=torch.float16)
     教师pipeline的compel = Compel(truncate_long_prompts=False, tokenizer=[教师pipeline.tokenizer, 教师pipeline.tokenizer_2], text_encoder=[教师pipeline.text_encoder, 教师pipeline.text_encoder_2],  returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED, requires_pooled=[False, True])
     教师pipeline.vae.to(dtype=torch.float32)
@@ -244,6 +234,7 @@ def _ember(all_ep, train_data_dir, pretrained_model_name_or_path, teacher_model_
     教师pipeline.vae.requires_grad_(False)
     教师pipeline.text_encoder.requires_grad_(False)
     教师pipeline.text_encoder_2.requires_grad_(False)
+    教师pipeline.set_progress_bar_config(disable=True)
 
     train_dataset = 生成dataset(None, train_data_dir, drop_tag_rate, drop_char_feature_rate, 学人rate, min_size, max_size)
     train_dataloader = torch.utils.data.DataLoader(
@@ -268,11 +259,19 @@ def _ember(all_ep, train_data_dir, pretrained_model_name_or_path, teacher_model_
             #     f.write(str(d['teacher_prompts']))
             i += 1
 
+    def _is_port_open(port=7860):
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            return s.connect_ex(('127.0.0.1', port)) == 0
+
     for ep in all_ep:
         i = 0
         it = iter(train_dataloader)
         while True:
             try:
+                while _is_port_open(7860) or _is_port_open(8188):
+                    print('别的程序在运行，休息1下！')
+                    time.sleep(30)
                 a = prefetch(it, None, 0, reform_prompt, prefetch_steps, drop_text_rate, teacher_cfg, inference_steps, text_encoder, 教师pipeline, text_encoding_pipeline, 教师pipeline的compel, vae, latents_bn_mean, latents_bn_std, max_sequence_length=200, text_encoder_out_layers=[10, 20, 30], device='cuda:0')
                 pool.submit(_dump到硬盘, a, output_dir, ep)
             except StopIteration:
