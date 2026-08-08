@@ -114,24 +114,17 @@
 
 ## 权重和效果
 
-我把权重放在了huggingface的[RUM-FLUX.2-klein-4B-preview](https://huggingface.co/rimochan/RUM-FLUX.2-klein-4B-preview/tree/main)，大家可以下载回来试1试。
+我把权重和使用方法放在了huggingface的[RUM-FLUX.2-klein-4B](https://huggingface.co/rimochan/RUM-FLUX.2-klein-4B)，大家可以下载回来试1试。
 
-下面是训练到1158k step的效果。能看出模型的prompt遵循还是很好的，人物和画师风格都不错，但是手指这些细节比较容易出问题。
-
-不过好在指标也还在涨，我反正就放着继续训，可能下个月它就如臻化境了！
+能看出模型的prompt遵循还是很好的，人物和画师风格都不错，但是手指这些细节比较容易出问题。
 
 <img src='img/flux_1740000.webp' width='1000px'>
-
-使用方法可以看这个[使用文档](使用文档.md)。
-
-对了，这个是Flux2-klein，上面的指标曲线是SD3.5，大家不要看错了。
-
-然后SD3.5那个反正已经落伍了，应该也没有人会想去用，我就不放权重了，对它的效果有兴趣的话可以到`img`文件夹里面自己看。
 
 
 ## 如何训练
 
 要把训练跑起来并不是那么复杂，但其实是有满多细节的。如果有什么遗漏的话，可能效果就不好。因此单独写了1个训练文档，可以看这个[训练文档](训练文档.md)。
+
 
 ## 1些问题
 
