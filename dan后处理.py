@@ -58,7 +58,7 @@ class dan后处理:
                 if random.random() < self.drop_char_feature_rate and 签 in 剩下的标签:
                     剩下的标签.remove(签)
         
-        for 坏标签 in ['oekaki', 'monochrome', 'greyscale', 'greyscale_with_colored_background', 'artist_name', 'signature', 'twitter_username', 'patreon_username', 'speech_bubble', 'thought_bubble', 'limited_palette', 'sketch', 'typo', 'character_name', 'english_text', 'dated', 'copyright_name', 'signature', 'comic']:
+        for 坏标签 in ['oekaki', 'monochrome', 'greyscale', 'greyscale_with_colored_background', 'artist_name', 'signature', 'twitter_username', 'patreon_username', 'speech_bubble', 'thought_bubble', 'limited_palette', 'sketch', 'typo', 'character_name', 'english_text', 'dated', 'copyright_name', 'signature', 'comic', 'qr_code', 'watermark']:
             if 坏标签 in 剩下的标签 and random.random() < 0.9:
                 剩下的标签.remove(坏标签)
 

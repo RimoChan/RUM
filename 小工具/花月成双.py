@@ -19,7 +19,7 @@ from diffusers import Flux2KleinPipeline, AutoencoderKLFlux2
 所有老人 = {i.replace(' ', '_') for i in set(json.loads(open('../人频率1~6400000.json').read()))}
 
 
-坏标签 = {'monochrome', 'greyscale', 'multiple_views', 'speech_bubble', 'thought_bubble', 'traditional_media', 'border', 'column_lineup', '2koma', '3koma', '4koma', 'extra_arms', 'head_out_of_frame', '4girls', '4boys', 'comic', 'cover_page', 'dated', 'copyright_name', 'patreon_username', 'character_name', 'twitter_username', 'artist_name'}
+坏标签 = {'monochrome', 'greyscale', 'multiple_views', 'speech_bubble', 'thought_bubble', 'traditional_media', 'border', 'column_lineup', '2koma', '3koma', '4koma', 'extra_arms', 'head_out_of_frame', '4girls', '4boys', 'comic', 'cover_page', 'dated', 'copyright_name', 'patreon_username', 'character_name', 'twitter_username', 'artist_name', 'qr_code', 'watermark'}
 多人标签 = {'2girls', '2boys', '3girls', '3boys'}
 
 
@@ -56,6 +56,7 @@ def 等上个任务结束(target_gb=2.0, 检查间隔=120):
 # python 花月成双.py --输入文件夹="S:\RUM缓存_谨慎水月_时间结界" --cuda_dir="C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.8/bin"
 # python 花月成双.py --输入文件夹="R:\RUM缓存_正义"
 # python 花月成双.py --输入文件夹="R:\RUM缓存_正义2"
+# python 花月成双.py --输入文件夹="R:\RUM缓存_正义3"
 def ember(输入文件夹: str, 逆=False, cuda_dir=None):
     等上个任务结束()
     if cuda_dir:

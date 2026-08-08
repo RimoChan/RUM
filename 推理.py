@@ -8,7 +8,7 @@ from diffusers import StableDiffusionXLPipeline, Flux2KleinPipeline
 from 哭 import 哭model
 
 原 = "R:/models/FLUX.2-klein-base-4B"
-新 = "R:/RUM-FLUX.2-klein-4B-preview/model-checkpoint-1550000.safetensors"
+新 = "R:/RUM-FLUX.2-klein-4B/RUM-FLUX.2-klein-4B.safetensors"
 
 sdxl = "C:/Users/Administrator/Desktop/models/waiNSFWIllustrious_v140.safetensors"
 
@@ -43,10 +43,10 @@ pipeline.to('cuda')
 教师pipeline.text_encoder_2.to('cuda')
 
 validation_prompt = [
-    ('1girl, kisaki (blue archive), holding baozi, eating, table, indoors, looking down, momoko (momopoco)', 1),
-    ('1girl, momoi (blue archive), typing on keyboard, computer, blue necktie, pink shoulder white sleeve, white coat, white shirt, v-shaped eyebrows, sitting on gaming chair, indoors, starshadowmagician', 2),
-    ('1girl, yuuka (blue archive), holding cup, black jacket, suit, blue necktie, hand twirling hair, indoors, fuzichoco', 3),
-    ('1girl, azusa (blue archive), holding ice cream, eating, outdoors, shopping street, black sailor collar, white shirt, light smile, fingers, huwari (dnwls3010)', 4),
+    ('1girl, kisaki (blue archive), holding baozi, eating, table, indoors, looking down, momoko (momopoco), liduke', 1),
+    ('1girl, momoi (blue archive), typing on keyboard, computer, blue necktie, pink shoulder white sleeve, white coat, white shirt, v-shaped eyebrows, sitting on gaming chair, indoors, baram, starshadowmagician', 2),
+    ('1girl, yuuka (blue archive), holding cup, black jacket, suit, blue necktie, hand twirling hair, indoors, fuzichoco, mika pikazo', 3),
+    ('1girl, azusa (blue archive), holding ice cream, eating, outdoors, shopping street, black sailor collar, white shirt, light smile, huwari (dnwls3010)', 4),
 ]
 
 for width in [960]:
@@ -65,11 +65,11 @@ for width in [960]:
 
 
 edit_prompt = [
-    ('change style to fuzichoco', '', 5),
-    ('change to 1girl, hakurei reimu, black hair, remove twintails', '', 5),
+    ('change style to fuzichoco', 'change background', 5),
+    ('change to 1girl, hakurei reimu, black hair, ascot, remove twintails', '', 5),
     ('white hair', 'short hair', 1),
     ('change to long dress, wedding dress, holding own dress, strapless', '', 5),
-    ('change to long hair', '', 5),
+    ('change to long hair', '', 2),
     ('beach, outdoors', '', 5),
 ]
 
